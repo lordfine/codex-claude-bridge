@@ -1,0 +1,14 @@
+# 本机会话配置
+.claude/
+
+# 依赖、运行记录与发布产物
+node_modules/
+__pycache__/
+*.log
+发布产物/
+.env
+.env.*
+
+# 系统元数据
+._*
+.DS_Store

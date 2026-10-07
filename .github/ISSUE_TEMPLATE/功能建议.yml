@@ -1,0 +1,18 @@
+name: 功能建议
+description: 提议更便利的委派、接入或协作方式
+title: "[建议] "
+body:
+  - type: textarea
+    id: scenario
+    attributes:
+      label: 使用场景
+      description: 你希望 Codex 帮你完成什么工作，当前遇到什么阻碍？
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 期望的交互方式
+      description: 描述输入、预期行为与结果，不需要先设计技术方案。
+    validations:
+      required: true

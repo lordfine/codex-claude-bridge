@@ -1,0 +1,28 @@
+name: 问题反馈
+description: 报告安装、会话或协作过程中遇到的问题
+title: "[问题] "
+body:
+  - type: markdown
+    attributes:
+      value: 请隐藏 API 密钥、令牌、个人对话和其他敏感配置。
+  - type: textarea
+    id: environment
+    attributes:
+      label: 运行环境
+      description: 插件版本、系统、Codex、Claude Code 及 Orca 版本；执行路径是原生托管还是 Orca。
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 复现步骤
+      description: 你下达了什么任务，在哪一步出现问题？
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: 预期与实际结果
+      description: 可附脱敏后的日志或截图。
+    validations:
+      required: true

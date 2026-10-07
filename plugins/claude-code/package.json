@@ -1,0 +1,9 @@
+{
+  "name": "codex-claude-bridge-runtime",
+  "version": "0.17.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "node-pty": "^1.1.0"
+  }
+}
