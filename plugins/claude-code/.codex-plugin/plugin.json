@@ -1,16 +1,16 @@
 {
   "name": "claude-code",
-  "version": "0.17.0",
-  "description": "让 Codex 管理 Claude Code 可见会话、权限、进度与验收。",
+  "version": "0.18.0",
+  "description": "让 Codex 按协作频率指挥 Claude Code，管理可见会话、阶段交付与验收。",
   "author": {
     "name": "lordfine"
   },
-  "skills": "./skills/",
+  "skills": "./skills/consult-claude",
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Claude 协作桥接",
-    "shortDescription": "Codex 指挥 Claude Code 执行与审查任务。",
-    "longDescription": "通过本地桥接器创建可见 Claude Code 会话，管理独立工作树、增量进度、敏感权限、只读审查和验收合并；继承用户现有 Claude Code 配置。",
+    "shortDescription": "分档指挥 Claude Code 执行、交付与审查。",
+    "longDescription": "默认中频协作，通过本地桥接器管理原生或 Orca 可见会话、阶段交付、只读历史和事件续接；原生托管支持独立工作树、审查与验收合并，继承用户现有 Claude Code 配置。",
     "developerName": "lordfine",
     "category": "Productivity",
     "capabilities": [],

@@ -207,6 +207,7 @@ export async function managedWorkflow(args = {}) {
           if (item.taskId) continue;
           const prompt = `${item.prompt}\n\n交付要求：${fresh.acceptance || "完成后简短报告改动、检查结果和未完成事项"}`;
           const task = createManagedTask({ cwd: fresh.cwd, prompt, model: item.model,
+            profile: args.profile, process_docs: args.process_docs,
             workflow_id: fresh.id, workflow_item_id: item.id, workflow_operation_id: key, controller_id: controller,
             visible: args.visible, max_minutes: args.max_minutes, max_turns: args.max_turns,
             subagent_limit: args.subagent_limit });

@@ -69,9 +69,9 @@ test("输入接收不冒充完成；正文确认后可读交付，重复请求�
   const args = { action: "send", id: r.id, controller_id: "主控一", request_id: "任务一", prompt: "请完成验证" };
   const sent = await f.api(args); assert.equal(sent.lastInstruction.state, "accepted");
   const duplicate = await f.api(args); assert.equal(duplicate.duplicate, true);
-  assert.equal(f.calls.filter((c) => c.includes("请完成验证")).length, 1);
+  assert.equal(f.calls.filter((c) => c.some((s) => s.startsWith("请完成验证"))).length, 1);
   f.state.logged = true; f.state.completed = true; f.state.text = "验证完成";
-  const status = await f.api({ action: "status", id: r.id, controller_id: "主控一" });
+  const status = await f.api({ action: "status", id: r.id, controller_id: "主控一", include_text: true });
   assert.equal(status.lastInstruction.state, "completed"); assert.equal(status.turn.text, "验证完成");
 });
 

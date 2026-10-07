@@ -5,6 +5,8 @@ import crypto from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { MANAGED_ROOT, controllerId, readJson, writeJson, resolveModel, listTasks, readRuntime } from "./managed-state.mjs";
+import { observeInstruction, readHistory } from "./会话读取.mjs";
+import { effectiveProfile, validateProfile, prepareRecordDocuments, deliveryInstruction } from "./协作策略.mjs";
 
 const execute = promisify(execFile);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -16,7 +18,7 @@ const normalized = (value) => {
 const quote = (value) => `'${String(value).replace(/'/g, "''")}'`;
 let executable;
 
-async function orca(args, cwd) {
+export async function orcaCall(args, cwd) {
   if (!executable) {
     if (process.env.ORCA_CLI_COMMAND) executable = process.env.ORCA_CLI_COMMAND;
     else {
@@ -30,15 +32,23 @@ async function orca(args, cwd) {
       }
     }
   }
-  let output;
+  let output, failure;
   try { output = await execute(executable, [...args, "--json"], { cwd, windowsHide: true, encoding: "utf8", timeout: 65000, maxBuffer: 2_000_000 }); }
-  catch (error) {
-    // 不输出启动命令或配置内容，尤其不能把终端中的凭据带入错误摘要。
-    throw new Error(`Orca CLI 调用失败（${error.code || "未知"}），请核对已选 CLI 和运行时；不会切换其他安装或重发指令`);
-  }
-  let response; try { response = JSON.parse(output.stdout); } catch { throw new Error("Orca 返回内容不是 JSON"); }
-  if (!response.ok) throw new Error(`Orca 拒绝操作：${response.error?.code || "未知错误"}`);
-  return response;
+  catch (error) { failure = error; output = { stdout: error.stdout || "" }; }
+  return parseOrcaResponse(output.stdout, args, failure);
+}
+
+export function parseOrcaResponse(stdout, args, failure) {
+  let response; try { response = JSON.parse(stdout); } catch {}
+  if (response?.ok) return response;
+  const rawCode = response?.error?.code;
+  const code = typeof rawCode === "string" && /^[a-z0-9_-]{1,64}$/i.test(rawCode) ? rawCode : failure?.killed ? "TRANSPORT_TIMEOUT" : failure ? "CLI_EXIT" : "INVALID_JSON";
+  const operation = args.slice(0, 2).join(".");
+  if (/wait.*timeout|timeout.*wait/i.test(code) && args[1] === "wait") return { ok: true, result: { wait: { satisfied: false, timedOut: true, reason: "wait_timeout" } } };
+  const error = new Error(`Orca 操作失败：${code}；阶段 ${operation}，不自动重发`);
+  error.code = code; error.details = { code, operation, cliExitCode: typeof failure?.code === "number" ? failure.code : null,
+    retryable: !["send", "create", "close"].includes(args[1]), uncertain: ["send", "create", "close"].includes(args[1]) };
+  throw error;
 }
 
 export function statusIdentity(lines) {
@@ -60,41 +70,25 @@ function transcriptFile(sessionId) {
   return matches.length === 1 ? matches[0] : null;
 }
 
-export function readTurn(sessionId, cwd, instruction) {
-  const file = transcriptFile(sessionId);
-  if (!file) return { logged: false, completed: false, text: "", available: false };
-  const size = fs.statSync(file).size, start = instruction.baseline || 0;
-  if (size < start) return { logged: false, completed: false, text: "", available: false, changed: true };
-  // 只读取本次指令之后的记录；超过限额明确报告，不把不完整数据当成验收依据。
-  const length = Math.min(size - start, 512 * 1024), buffer = Buffer.alloc(length), fd = fs.openSync(file, "r");
-  try { fs.readSync(fd, buffer, 0, length, start); } finally { fs.closeSync(fd); }
-  let logged = false, completed = false, text = "", ambiguous = false;
-  for (const line of buffer.toString("utf8").split("\n")) {
-    let e; try { e = JSON.parse(line); } catch { continue; }
-    if (e.sessionId !== sessionId || e.cwd && normalized(e.cwd) !== normalized(cwd) || e.isSidechain || e.isMeta) continue;
-    const content = e.message?.content;
-    const promptText = typeof content === "string" ? content : Array.isArray(content) && content.length && content.every((part) => part.type === "text") ? content.map((part) => part.text).join("\n") : null;
-    if (e.type === "user" && promptText !== null) {
-      if (!logged && promptText === instruction.prompt) logged = true;
-      else if (logged) { if (!completed) ambiguous = true; break; }
-    }
-    if (logged && e.type === "assistant") {
-      const body = (Array.isArray(content) ? content : []).filter((item) => item.type === "text").map((item) => item.text).join("\n");
-      if (body) text += `${text ? "\n" : ""}${body}`;
-      if (body && e.message?.stop_reason === "end_turn") completed = true;
-    }
-  }
-  return { logged, completed: completed && !ambiguous && size - start <= length, text: text.slice(-16000), available: true,
-    ambiguous, truncated: size - start > length };
+export function readTurn(sessionId, cwd, instruction, saved = {}) { return observeInstruction(sessionId, cwd, instruction, saved); }
+
+export async function probeOrcaRecord(r, call = orcaCall) {
+  const shown = await call(["terminal", "show", "--terminal", r.terminalId], r.cwd), terminal = shown.result.terminal;
+  if (shown._meta?.runtimeId !== r.runtimeId || terminal.incarnationId !== r.incarnationId || !terminal.connected || !terminal.writable || terminal.agentIdentity !== "claude") return { stale: true };
+  const screen = (await call(["terminal", "read", "--terminal", r.terminalId, "--limit", "24"], r.cwd)).result.terminal;
+  const lines = screen.tail || [];
+  const busy = lines.some((line) => /^\s*[✢✳✻✶✽].*…|(?:Generating|Thinking|Working).*…|esc to interrupt/i.test(line));
+  const needsInput = lines.some((line) => /Do you want to|Permission rule .*requires confirmation/i.test(line)) && lines.some((line) => /^\s*[❯>]\s*1\.\s*(?:Yes|Allow)/i.test(line));
+  return { busy, needsInput, draft: Boolean(screen.draft), revision: crypto.createHash("sha256").update(JSON.stringify([busy, needsInput, screen.draft || ""])).digest("hex") };
 }
 
-export function createOrcaAdapter({ call = orca, root = path.join(MANAGED_ROOT, "orca"), observe = readTurn } = {}) {
+export function createOrcaAdapter({ call = orcaCall, root = path.join(MANAGED_ROOT, "orca"), observe = readTurn } = {}) {
   const folder = path.join(root, "会话"), requests = path.join(root, "请求");
   const recordPath = (id) => { if (!UUID.test(String(id))) throw new Error("须使用精确 Orca 接入记录 ID"); return path.join(folder, `${id}.json`); };
   const records = () => { try { return fs.readdirSync(folder).filter((f) => f.endsWith(".json")).map((f) => readJson(path.join(folder, f))).filter(Boolean); } catch { return []; } };
   const summary = (r) => ({ id: r.id, controllerId: r.controllerId, sessionId: r.sessionId, cwd: r.cwd,
     terminalId: r.terminalId, incarnationId: r.incarnationId, runtimeId: r.runtimeId, createdByPlugin: r.createdByPlugin,
-    state: r.state, model: r.model, lastInstruction: r.lastInstruction ? { requestId: r.lastInstruction.requestId,
+    state: r.state, owner: r.owner || "codex", model: r.model, profile: effectiveProfile(r), revision: r.revision || null, lastInstruction: r.lastInstruction ? { requestId: r.lastInstruction.requestId,
       state: r.lastInstruction.state, orcaRequestId: r.lastInstruction.orcaRequestId } : null });
 
   async function bound(r) {
@@ -114,6 +108,7 @@ export function createOrcaAdapter({ call = orca, root = path.join(MANAGED_ROOT, 
     const idle = await call(["terminal", "wait", "--terminal", t.handle, "--for", "tui-idle", "--timeout-ms", "1000"], cwd);
     if (!idle.result.wait.satisfied) throw new Error(`Claude 尚未空闲：${idle.result.wait.blockedReason || "当前轮未结束"}`);
     const before = await screen(t, cwd);
+    if (before.tail.some((line) => /^\s*[✢✳✻✶✽].*…|(?:Generating|Thinking|Working).*…|esc to interrupt/i.test(line))) throw new Error("屏幕仍有执行信号，不能把空输入框当成工作已停止");
     let identity = statusIdentity(before.tail), opened = false;
     if (!identity) {
       if (before.draft || !emptyPrompt(before.tail)) throw new Error("Claude 当前有草稿、弹窗或未就绪，不能注入 /status 或任务");
@@ -135,15 +130,23 @@ export function createOrcaAdapter({ call = orca, root = path.join(MANAGED_ROOT, 
     return { ...identity, probed: opened };
   }
 
-  function updateTurn(r) {
+  function updateTurn(r, args = {}) {
     if (!r.lastInstruction) return { ...summary(r), turn: null };
-    const turn = observe(r.sessionId, r.cwd, r.lastInstruction);
-    if (turn.logged) r.lastInstruction.state = turn.completed ? "completed" : "logged";
+    const turn = observe(r.sessionId, r.cwd, r.lastInstruction, r.observation || {});
+    if (turn.logged && r.lastInstruction.terminalState !== "cancelled") r.lastInstruction.state = turn.completed ? "completed" : "logged";
+    if (turn.failed) r.lastInstruction.state = "failed";
+    r.observation = turn;
+    r.revision = crypto.createHash("sha256").update(JSON.stringify([r.lastInstruction.state, turn.text, turn.ambiguous, turn.changed, turn.available, r.owner, r.cancelRequested, turn.backgroundOutstanding])).digest("hex");
+    const fresh = readJson(recordPath(r.id));
+    if (fresh && (fresh.lastInstruction?.requestId !== r.lastInstruction.requestId || fresh.controlRevision !== r.controlRevision || fresh.state !== r.state)) return { ...summary(fresh), changedDuringObservation: true, turn: null };
     writeJson(recordPath(r.id), r);
-    return { ...summary(r), turn };
+    const { text, ...short } = turn;
+    const unchanged = args.after_revision === r.revision;
+    return { ...summary(r), unchanged, turn: unchanged ? null : { ...short, ...(args.include_text ? { text } : {}) } };
   }
 
   async function operation(args, master) {
+    if (args.action === "history") return readHistory(args);
     if (args.action === "list") {
       if (!args.cwd || !path.isAbsolute(args.cwd)) throw new Error("须提供绝对工作区目录");
       const response = await call(["terminal", "list", "--worktree", `path:${args.cwd}`, "--limit", "100"], args.cwd);
@@ -152,6 +155,7 @@ export function createOrcaAdapter({ call = orca, root = path.join(MANAGED_ROOT, 
         records: records().filter((r) => r.controllerId === master && r.terminalId === t.handle && r.state === "attached").map(summary) })), truncated: response.result.truncated };
     }
     if (["create", "attach"].includes(args.action)) {
+      if (args.profile != null) validateProfile(args.profile);
       if (!args.cwd || !path.isAbsolute(args.cwd) || !fs.existsSync(args.cwd)) throw new Error("须提供存在的绝对工作区目录");
       const active = records().filter((r) => r.state === "attached");
       if (args.action === "attach") {
@@ -173,7 +177,7 @@ export function createOrcaAdapter({ call = orca, root = path.join(MANAGED_ROOT, 
           }
           if (active.some((r) => r.sessionId === checked.sessionId)) throw new Error("该 Claude 会话已经被另一条 Orca 接入记录占用");
           const r = { id: crypto.randomUUID(), controllerId: master, ...checked, cwd: args.cwd, terminalId: t.handle,
-            incarnationId: t.incarnationId, runtimeId: response._meta.runtimeId, createdByPlugin: false, state: "attached", createdAt: new Date().toISOString() };
+            incarnationId: t.incarnationId, runtimeId: response._meta.runtimeId, createdByPlugin: false, state: "attached", coordinationProfile: args.profile || null, createdAt: new Date().toISOString() };
           writeJson(recordPath(r.id), r); return summary(r);
         }
         throw new Error("没有找到身份吻合且空闲的 Orca Claude 终端；未重启任何会话");
@@ -187,51 +191,84 @@ export function createOrcaAdapter({ call = orca, root = path.join(MANAGED_ROOT, 
       if (!t?.handle || !t.incarnationId || !response._meta?.runtimeId) throw new Error("Orca 未返回完整终端身份；新建回执不明，请先列出核对");
       const r = { id: crypto.randomUUID(), controllerId: master, sessionId, cwd: args.cwd, terminalId: t.handle,
         incarnationId: t.incarnationId, runtimeId: response._meta.runtimeId, createdByPlugin: true, state: "attached", model,
-        createdAt: new Date().toISOString() };
+        coordinationProfile: args.profile || null, createdAt: new Date().toISOString() };
       writeJson(recordPath(r.id), r);
       return { ...summary(r), ready: false, message: "原生终端已创建。首次信任或配置弹窗请在 Orca 处理；空闲后用 send 派发任务。" };
     }
     const r = readJson(recordPath(args.id));
     if (!r || r.controllerId !== master) throw new Error("该 Orca 接入记录不属于当前 Codex 主控");
     if (r.state !== "attached") throw new Error("接入已释放或关闭，须重新接入");
-    if (args.action === "release") { r.state = "released"; writeJson(recordPath(r.id), r); return { ...summary(r), terminalKeptAlive: true }; }
+    if (args.action === "release") { r.controlRevision = (r.controlRevision || 0) + 1; r.state = "released"; writeJson(recordPath(r.id), r); return { ...summary(r), terminalKeptAlive: true }; }
     const t = await bound(r);
     if (args.action === "close") {
       if (!r.createdByPlugin && args.close_attached_confirmed !== true) throw new Error("关闭已有用户终端须明确确认；只交还控制权请用 release");
       await call(["terminal", "close", "--terminal", r.terminalId], r.cwd);
       r.state = "closed"; writeJson(recordPath(r.id), r); return summary(r);
     }
-    if (args.action === "status") return { ...updateTurn(r), terminal: { connected: t.connected, writable: t.writable, agentWait: t.agentWait } };
+    if (args.action === "status") return { ...updateTurn(r, args), terminal: { connected: t.connected, writable: t.writable, agentWait: t.agentWait } };
+    if (args.action === "takeover") {
+      if (args.idle_confirmed !== true) throw new Error("先确认人类当前轮与队列结束，再交回控制权");
+      if (r.cancelRequested && args.stop_confirmed !== true) throw new Error("取消尚未确认覆盖后台工具与子代理；需有停止证据或用户明确确认");
+      const checked = await identity(t, r.cwd); if (checked.sessionId !== r.sessionId) throw new Error("会话身份已变化");
+      r.owner = "codex";
+      r.controlRevision = (r.controlRevision || 0) + 1;
+      if (r.cancelRequested && r.lastInstruction) { r.lastInstruction.state = "cancelled"; r.lastInstruction.terminalState = "cancelled"; }
+      r.cancelRequested = false;
+      const file = transcriptFile(r.sessionId); if (r.observation && file) r.observation.cursor = { offset: fs.statSync(file).size };
+      if (r.observation) r.observation.nextUserObserved = false;
+      if (args.stop_confirmed === true && r.observation) { r.observation.background = {}; r.observation.backgroundOutstanding = false; }
+      writeJson(recordPath(r.id), r); return summary(r);
+    }
+    if (args.action === "cancel") {
+      await call(["terminal", "send", "--terminal", r.terminalId, "--interrupt"], r.cwd);
+      r.controlRevision = (r.controlRevision || 0) + 1; r.cancelRequested = true; r.owner = "human"; writeJson(recordPath(r.id), r);
+      return { ...summary(r), cancellation: "requested_unconfirmed", message: "已请求中断；尚未证明后台工具、子代理和人类队列全部停止，自动派发已暂停" };
+    }
+    if (args.action === "transcript") return readHistory({ ...args, session_id: r.sessionId, cwd: r.cwd });
     if (args.action === "read") {
       const options = ["terminal", "read", "--terminal", r.terminalId, "--limit", String(Math.min(Math.max(Number(args.limit) || 60, 1), 300))];
       if (args.cursor != null) options.push("--cursor", String(args.cursor));
-      const result = await call(options, r.cwd); return { ...updateTurn(r), screen: result.result.terminal };
+      const result = await call(options, r.cwd), screenValue = result.result.terminal;
+      const screenRevision = crypto.createHash("sha256").update(JSON.stringify([screenValue.tail, screenValue.draft])).digest("hex");
+      return { ...updateTurn(r, args), screen: args.screen_revision === screenRevision ? { unchanged: true, revision: screenRevision } : { ...screenValue, revision: screenRevision, cursorType: "orca_screen", warning: "屏幕游标不等同于 Claude 正文游标" } };
     }
     if (args.action === "wait") {
+      if (args.after_revision != null) {
+        const until = Date.now() + Math.min(Math.max(Number(args.timeout_ms) || 10000, 1), 60000);
+        do { const next = updateTurn(r, args); if (!next.unchanged) return next; await pause(Math.min(500, Math.max(1, until - Date.now()))); } while (Date.now() < until);
+        return { ...summary(r), unchanged: true, timedOut: true };
+      }
       const wait = await call(["terminal", "wait", "--terminal", r.terminalId, "--for", "tui-idle", "--timeout-ms", String(Math.min(Math.max(Number(args.timeout_ms) || 10000, 1), 60000))], r.cwd);
-      return { ...updateTurn(r), wait: wait.result.wait };
+      return { ...updateTurn(r, args), wait: { ...wait.result.wait, timedOut: !wait.result.wait.satisfied } };
     }
     if (args.action !== "send") throw new Error("未知 Orca 会话操作");
+    if (r.owner === "human" || r.cancelRequested) throw new Error("会话由人类控制或取消尚未确认，先明确交回控制权");
+    if (r.observation?.backgroundOutstanding) throw new Error("主轮结束但后台任务范围尚未确认，不继续派发");
     if (!args.prompt || typeof args.prompt !== "string" || args.prompt.length > 50000 || /^[\s]*\//.test(args.prompt) || /[\u0000-\u0008\u001b]/.test(args.prompt)) throw new Error("须提供普通任务正文；不接受斜杠命令或终端控制字符");
-    if (r.lastInstruction && !["completed"].includes(updateTurn(r).lastInstruction.state)) throw new Error("上一条指令尚未确认完成，先读取并核对，不能重复派发");
+    if (r.lastInstruction && !["completed", "cancelled"].includes(updateTurn(r).lastInstruction.state)) throw new Error("上一条指令尚未确认完成，先读取并核对，不能重复派发");
     const checked = await identity(t, r.cwd);
     if (checked.sessionId !== r.sessionId) throw new Error("Claude 实际会话 ID 已变化，停止发送，须按新 ID 重新接入");
     const file = transcriptFile(r.sessionId);
-    r.lastInstruction = { requestId: args.request_id, prompt: args.prompt, state: "pending", baseline: file ? fs.statSync(file).size : 0 };
+    const marker = `<bridge-instruction:${crypto.createHash("sha256").update(`${master}:${args.request_id}`).digest("hex").slice(0,24)}>`;
+    r.controlRevision = (r.controlRevision || 0) + 1;
+    r.lastInstruction = { requestId: args.request_id, marker, prompt: args.prompt, state: "pending", baseline: file ? fs.statSync(file).size : 0 };
+    r.observation = null;
+    const docs = args.process_docs === false ? null : prepareRecordDocuments(r, args.prompt);
+    const sentPrompt = args.prompt + `\n\n${marker}` + (docs ? deliveryInstruction(r, docs) : "");
     writeJson(recordPath(r.id), r);
     // 写入不明时禁止自动重发；请求日志保留 pending，后续只读取实际状态。
-    const response = await call(["terminal", "send", "--terminal", r.terminalId, "--text", args.prompt, "--enter", "--wait-submit", "10"], r.cwd);
+    const response = await call(["terminal", "send", "--terminal", r.terminalId, "--text", sentPrompt, "--enter", "--wait-submit", "10"], r.cwd);
     const receipt = response.result.send;
     r.lastInstruction.state = receipt.prompt?.stages?.includes("turn_started") ? "started" : receipt.accepted ? "accepted" : "rejected";
     r.lastInstruction.orcaRequestId = receipt.prompt?.requestId || response.result.mutation?.requestId;
     writeJson(recordPath(r.id), r);
-    return { ...updateTurn(r), receipt, message: "accepted 仅表示输入接收；logged/completed 由精确会话记录核对。回执不明时不重发。" };
+    return { ...updateTurn(r, args), receipt, processDocuments: docs, message: "accepted 仅表示输入接收；logged/completed 由精确会话记录核对。回执不明时不重发。" };
   }
 
   return async (args = {}) => {
     const master = args.controller_id || controllerId();
     if (!master) throw new Error("请提供 Codex 主控任务 ID");
-    const mutate = ["create", "attach", "send", "release", "close"].includes(args.action);
+    const mutate = ["create", "attach", "send", "release", "close", "takeover", "cancel"].includes(args.action);
     if (!mutate) return operation(args, master);
     if (!args.request_id || typeof args.request_id !== "string" || args.request_id.length > 120) throw new Error("改变 Orca 会话须提供稳定 request_id");
     // 跨 MCP 进程串行修改，崩溃后的请求保持不明状态，不能凭空重复新建或发送。

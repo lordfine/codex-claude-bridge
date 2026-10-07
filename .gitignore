@@ -6,6 +6,8 @@ node_modules/
 __pycache__/
 *.log
 发布产物/
+plugins/claude-code/skills/*-workspace/
+.技能评估/
 .env
 .env.*
 

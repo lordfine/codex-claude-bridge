@@ -3,6 +3,7 @@ import path from "node:path";
 import { MANAGED_ROOT } from "./lib/managed-state.mjs";
 import { wakeDir, readWakeJson, writeWakeJson, pendingWakeEvents, codexActivity, reconcileWakeQueue } from "./lib/事件队列.mjs";
 import { claimWakeRunner, currentWakeEvents, dispatchWakeBatch } from "./lib/事件续接.mjs";
+import { observeLocalRecords } from "./lib/本地观察.mjs";
 
 const controller = process.argv[2]; if (!controller) process.exit(1);
 const folder = wakeDir(MANAGED_ROOT, controller);
@@ -15,6 +16,7 @@ try {
   while (true) {
     const config = readWakeJson(path.join(folder, "config.json")); if (!config?.enabled) break;
     reconcileWakeQueue(MANAGED_ROOT, controller, folder, config);
+    await observeLocalRecords(controller);
     const runtime = readWakeJson(runtimeFile);
     const pending = currentWakeEvents(folder, pendingWakeEvents(folder), controller);
     if (!runtime?.paused && pending.length) {

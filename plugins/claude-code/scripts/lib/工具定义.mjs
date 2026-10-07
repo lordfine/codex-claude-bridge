@@ -17,13 +17,30 @@ const SETUP_TOOL = {
 
 const MANAGED_TOOLS = [
   {
-    name: "delegate_orca", description: "管理 Orca 内的原生 Claude 会话：list 按工作区列出，attach 按精确 Claude UUID 接入正在运行的空闲终端，无须退出原进程；create 在已注册 Orca 工作区新建可见原生终端。send/read/status/wait 核对输入回执与真实会话正文；release 保留终端，close 关闭。继承当前 Claude 配置，启动弹窗由用户处理；此入口暂不接入旧工作流、预算、敏感门禁或自动唤醒。改变状态需稳定 request_id。",
+    name: "delegate_coordination", description: "读取或设置主控的低/中/高协作档位，默认 medium；可逐任务覆盖。prepare 创建忽略 Git 的过程记录；snapshot 核对实际工作目录；handoff 只返回已核验短交付单。普通进度不调用模型，重大异常和需要决定的交付即时处理。",
     inputSchema: { type: "object", properties: {
-      action: { type: "string", enum: ["list", "create", "attach", "send", "status", "read", "wait", "release", "close"] },
+      action: { type: "string", enum: ["status", "configure", "profile", "prepare", "snapshot", "handoff"] },
+      controller_id: { type: "string" }, task_id: { type: "string" }, backend: { type: "string", enum: ["native", "orca"] },
+      profile: { type: "string", enum: ["low", "medium", "high", "inherit"] }, deep_effort: { type: "string", enum: ["inherit", "low", "medium", "high", "xhigh", "max", "ultra"] }, task_text: { type: "string" }
+    }, required: ["action"], additionalProperties: false }
+  },
+  {
+    name: "delegate_history", description: "按原绝对目录与精确 Claude UUID 只读历史或实时 JSONL 正文，无须接管或停止原进程。默认分页、2400字符与常见凭据模式隐藏；使用返回的字节/字符游标续读。不同于屏幕游标。",
+    inputSchema: { type: "object", properties: { session_id: { type: "string" }, cwd: { type: "string" },
+      cursor: { type: "object" }, max_chars: { type: "integer", minimum: 1, maximum: 16000 },
+      roles: { type: "array", items: { type: "string", enum: ["user", "assistant"] } }, include_tools: { type: "boolean" }
+    }, required: ["session_id", "cwd"], additionalProperties: false }
+  },
+  {
+    name: "delegate_orca", description: "管理 Orca 原生 Claude 会话。status 默认短状态，用 after_revision 去重；transcript/history 按正文游标分页，read 的 screen_revision 独立去重屏幕。取消返回请求状态，不能据此声称后台全部停止。通过 delegate_wake 可接入本地事件续接；仍不提供 Orca 自动合并和统一执行预算。",
+    inputSchema: { type: "object", properties: {
+      action: { type: "string", enum: ["list", "create", "attach", "send", "status", "read", "wait", "release", "close", "takeover", "cancel", "transcript", "history"] },
       controller_id: { type: "string" }, cwd: { type: "string" }, id: { type: "string" },
       session_id: { type: "string" }, terminal_id: { type: "string" }, idle_confirmed: { type: "boolean" },
       request_id: { type: "string" }, title: { type: "string" }, model: { type: "string" }, prompt: { type: "string" },
-      timeout_ms: { type: "integer", minimum: 1, maximum: 60000 }, cursor: { type: "string" },
+      profile: { type: "string", enum: ["low", "medium", "high"] }, process_docs: { type: "boolean" }, include_text: { type: "boolean" }, stop_confirmed: { type: "boolean" },
+      after_revision: { type: "string" }, screen_revision: { type: "string" }, max_chars: { type: "integer" },
+      timeout_ms: { type: "integer", minimum: 1, maximum: 60000 }, cursor: { type: ["string", "object"] },
       limit: { type: "integer", minimum: 1, maximum: 300 }, close_attached_confirmed: { type: "boolean" }
     }, required: ["action"], additionalProperties: false }
   },
@@ -36,6 +53,7 @@ const MANAGED_TOOLS = [
       existing_idle_confirmed: { type: "boolean", description: "既有会话原进程已退出时才设 true；活动中的外部窗口不能被本桥接器直接接管" },
       model: { type: "string", description: "当前配置中的模型槽或实际模型名；省略则继承" },
       prompt: { type: "string", description: "可选的首条任务指令，待会话就绪后发送" },
+      profile: { type: "string", enum: ["low", "medium", "high"] }, process_docs: { type: "boolean" },
       max_minutes: { type: "integer" }, max_turns: { type: "integer" }, subagent_limit: { type: "integer" },
       controller_id: { type: "string", description: "主控 Codex 任务 ID；通常从环境自动获取" },
       visible: { type: "boolean", description: "是否自动打开可见窗口，默认 true" }
@@ -114,6 +132,7 @@ const MANAGED_TOOLS = [
     inputSchema: { type: "object", properties: {
       action: { type: "string", enum: ["create", "list", "status", "dispatch", "review", "revise", "accept", "checkpoint", "pause", "resume", "cancel"] },
       workflow_id: { type: "string" }, controller_id: { type: "string" }, request_id: { type: "string" },
+      profile: { type: "string", enum: ["low", "medium", "high"] }, process_docs: { type: "boolean" },
       cwd: { type: "string" }, goal: { type: "string" }, acceptance: { type: "string" }, detail: { type: "boolean" },
       item_id: { type: "string" }, model: { type: "string" }, feedback: { type: "string" },
       verification: { type: "string" }, summary: { type: "string" }, visible: { type: "boolean" },
@@ -151,7 +170,8 @@ const MANAGED_TOOLS = [
   {
     name: "delegate_wake", description: "配置按关键 Claude 事件自动续接指定 Codex CLI 会话。只在 Codex 记录空闲时启动；同主控串行，失败或回执不明暂停。status 不调用模型；disable 停止自动接续；resolve 须核对暂停运行后明确确认或重试。",
     inputSchema: { type: "object", properties: {
-      action: { type: "string", enum: ["configure", "enable", "disable", "status", "resolve"] },
+      action: { type: "string", enum: ["configure", "enable", "disable", "status", "resolve", "sync"] },
+      task_id: { type: "string" }, backend: { type: "string", enum: ["native", "orca"] }, request_id: { type: "string" },
       controller_id: { type: "string" }, target_thread_id: { type: "string" }, cwd: { type: "string" },
       quiet_seconds: { type: "integer", minimum: 1, maximum: 30 }, run_id: { type: "string" },
       decision: { type: "string", enum: ["acknowledge", "retry"] }

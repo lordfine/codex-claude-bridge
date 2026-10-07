@@ -15,6 +15,7 @@ import { launchVisibleWindow } from "./managed-window.mjs";
 import { ensurePtyRuntime } from "./managed-runtime.mjs";
 import { roleModel } from "./managed-preferences.mjs";
 import { withSessionLock } from "./managed-lock.mjs";
+import { validateProfile, effectiveProfile, prepareRecordDocuments, deliveryInstruction } from "./协作策略.mjs";
 
 const BROKER = fileURLToPath(new URL("../managed-broker.mjs", import.meta.url));
 const WATCHDOG = fileURLToPath(new URL("../managed-watchdog.mjs", import.meta.url));
@@ -282,6 +283,7 @@ function createManagedTaskUnlocked(options = {}) {
   if (reviewTarget && !reviewTarget.worktree) throw new Error("只能审查托管的新任务工作树");
   if (reviewTarget && (!options.review_ref || !/^[0-9a-f]{40}$/i.test(options.review_ref))) throw new Error("审查快照提交无效");
   const model = roleModel(reviewTarget?.source || source, kind, options.model);
+  if (options.profile != null) validateProfile(options.profile);
   const maxMinutes = integer(options.max_minutes, 90, 1, 1440, "执行时间");
   const maxTurns = integer(options.max_turns, 120, 1, 1000, "主会话轮数");
   const subagentLimit = integer(options.subagent_limit, 8, 1, 20, "子代理并发");
@@ -316,7 +318,7 @@ function createManagedTaskUnlocked(options = {}) {
     branch: worktree && kind !== "review" ? `codex/claude-${id.slice(0, 8)}` : null,
     sessionId, resume: existing, reviewOf: options.review_of || null,
     reviewRef: kind === "review" ? options.review_ref : null,
-    model, initialPrompt: options.prompt || null,
+    model, coordinationProfile: options.profile || null, initialPrompt: options.prompt || null,
     originalPrompt: options.prompt || null,
     workflowId: options.workflow_id || null, workflowItemId: options.workflow_item_id || null,
     workflowOperationId: options.workflow_operation_id || null,
@@ -330,6 +332,10 @@ function createManagedTaskUnlocked(options = {}) {
   };
   try {
     fs.mkdirSync(taskDir(id), { recursive: true });
+    if (kind === "implementation" && options.process_docs === true && task.initialPrompt) {
+      task.processDocuments = prepareRecordDocuments(task, options.prompt);
+      task.initialPrompt += deliveryInstruction(task, task.processDocuments);
+    }
     task.settingsPath = prepareClaudeSettings(task);
     task.handbackCommand = prepareHandbackCommand(task);
     writeTask(task);
@@ -388,7 +394,7 @@ export function createReviewTask(targetId, options = {}) {
     model: options.model, max_minutes: options.max_minutes ?? 30,
     workflow_id: target.workflowId, workflow_item_id: target.workflowItemId,
     workflow_operation_id: options.workflow_operation_id,
-    controller_id: options.controller_id, visible: options.visible
+    controller_id: options.controller_id, visible: options.visible, profile: options.profile || target.coordinationProfile || undefined
   });
 }
 
@@ -397,7 +403,7 @@ export function taskSummary(task) {
   const runtimeActive = runtime && runtime.status !== "exited" && isAlive(runtime.pid);
   let inboxCount = 0;
   try { inboxCount = fs.readdirSync(path.join(taskDir(task.id), "inbox")).filter((name) => /^[0-9a-f-]{36}\.json$/i.test(name)).length; } catch {}
-  return { id: task.id, controllerId: task.controllerId, kind: task.kind,
+  return { id: task.id, controllerId: task.controllerId, kind: task.kind, profile: effectiveProfile(task),
     alias: task.alias || null, formerAlias: task.formerAliases?.at(-1) || null, title: (task.originalPrompt || "").slice(0, 180),
     supersededBy: task.supersededBy || null,
     archivedAt: task.archivedAt || null, summary: task.archive?.summary || null,

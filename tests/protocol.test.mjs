@@ -32,7 +32,7 @@ test("tools/list 只公开准备检查与托管会话工具", async () => {
   const tl = await server.rpc("tools/list", {});
   assert.deepEqual(
     tl.result.tools.map((t) => t.name).sort(),
-    ["delegate_cancel", "delegate_create", "delegate_diff", "delegate_limit", "delegate_list", "delegate_manage", "delegate_models", "delegate_orca", "delegate_sessions",
+    ["delegate_cancel", "delegate_coordination", "delegate_create", "delegate_diff", "delegate_history", "delegate_limit", "delegate_list", "delegate_manage", "delegate_models", "delegate_orca", "delegate_sessions",
       "delegate_merge", "delegate_open", "delegate_permissions", "delegate_review",
       "delegate_send", "delegate_status", "delegate_takeover", "delegate_transcript", "delegate_wait", "delegate_wait_many", "delegate_wake", "delegate_workflow",
       "setup"].sort()
