@@ -49,7 +49,8 @@ export function claudeSessionStillRunning(task) {
   try {
     const query = `(Get-CimInstance Win32_Process -Filter "Name='claude.exe' OR Name='node.exe' OR Name='cmd.exe'" | Where-Object { $_.CommandLine -match '--(?:resume|session-id)\\s+\"?${task.sessionId}(?:\"|\\s|$)' } | Measure-Object).Count`;
     return Number(execFileSync("powershell.exe", ["-NoProfile", "-Command", query], {
-      encoding: "utf8", windowsHide: true, timeout: 5000
+      // Windows 冷启动和并发 CI 中 CIM 查询可能超过五秒，超时仍按不明状态阻止续接。
+      encoding: "utf8", windowsHide: true, timeout: 15000
     }).trim()) > 0;
   } catch {
     // 不能可靠确认进程已退出时，不启动第二份 Claude。
