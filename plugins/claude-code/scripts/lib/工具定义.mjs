@@ -159,4 +159,3 @@ const MANAGED_TOOLS = [
   }
 ];
 export const TOOLS = [SETUP_TOOL, ...MANAGED_TOOLS];
-
