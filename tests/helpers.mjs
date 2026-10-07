@@ -34,7 +34,7 @@ export function startServer(env = process.env) {
           pending.delete(msg.id);
           p(msg);
         }
-      } catch {
+      } catch {
       }
     }
   });
