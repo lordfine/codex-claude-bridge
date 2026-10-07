@@ -6,7 +6,7 @@
 
 **把一个需求，变成有分工、有进度、有验收的 AI 协作任务。**
 
-[![版本](https://img.shields.io/badge/版本-v0.17.0-303c3b)](https://github.com/lordfine/codex-claude-bridge/releases/latest)
+[![版本](https://img.shields.io/badge/版本-v0.18.0-303c3b)](https://github.com/lordfine/codex-claude-bridge/releases/latest)
 [![检查](https://github.com/lordfine/codex-claude-bridge/actions/workflows/test.yml/badge.svg)](https://github.com/lordfine/codex-claude-bridge/actions/workflows/test.yml)
 [![许可](https://img.shields.io/github/license/lordfine/codex-claude-bridge?label=许可)](./LICENSE)
 
@@ -67,10 +67,26 @@
 | 独立工作树、独立审查、返工、验收合并 | 已实现 | 尚未接入；在给定工作区执行 |
 | 默认并发 3、最高 10，超额排队 | 已实现，按 Codex 主控任务计算 | 尚未接入统一配额 |
 | 时间与主会话轮数预算 | 已实现，可调整 | 尚未接入 |
-| Claude 完成后触发 Codex CLI 续接 | 已实现 | 尚未接入 |
+| Claude 完成后触发 Codex CLI 续接 | 已实现 | 已实现，本地观察后按事件续接 |
 | 人类操作与权限处理 | 插件门禁与 `/交还` | 保持原会话权限与 Orca 钩子 |
 
-Windows 是优先实机验证平台。自动检查覆盖 91 项，迁移版保留 22 个公开工具；原打开 Codex 桌面窗口即时刷新、长期并发和远程 Orca 等场景仍需验证。[验证口径与限制](./docs/功能与限制.md)
+Windows 是优先实机验证平台。当前提供 24 个公开工具和 106 项回归检查；原打开 Codex 桌面窗口即时刷新、长期并发和远程 Orca 等场景仍需验证。[验证口径与限制](./docs/功能与限制.md)
+
+## 让 Codex 把用量花在判断上
+
+默认采用**中频协作**：Claude 按约定里程碑交付，Codex 再介入。你可以直接说：
+
+> 这项任务改成低频：让 Claude 连续完成一批实现，再独立审查和验收。重复失败、求助或方向变化及时告诉你。
+
+| 档位 | 正常介入时机 | 适用场景 |
+| --- | --- | --- |
+| 低频 | 完整实现批次、独立审查、最终验收 | 范围明确、执行模型稳定的持续实现 |
+| 中频（默认） | 约定里程碑，合并相关小任务 | 一般功能开发与缺陷修复 |
+| 高频 | 每个约定子任务交付 | 探索性任务、复杂依赖或快速纠偏 |
+
+普通进展由本地观察器处理，无变化不启动模型。关键决策保持原思考等级；必要的轻量同步使用真实 `low` 参数和本地摘要。三档都保留异常升级。阶段材料保存到 Git 忽略的 `.协作记录/`，历史和实时正文仍可追溯。
+
+档位控制介入边界，不能保证账单下降；上下文、缓存、全局技能与返工也影响用量。[协作档位与用量](./docs/协作档位与用量.md)
 
 ## 怎么开始？
 
@@ -101,7 +117,7 @@ codex plugin add claude-code@codex-claude-bridge
 2. **先单任务，再并行**：拆分能独立实现的工作；多人改同一文件时交替操作。
 3. **先验证当前模型能独立工作**：插件继承配置，不帮你切换 CCswitch 或修复供应商连接。
 4. **检查实际改动**：Claude 说完成、终端显示空闲，都不能代替验收。
-5. **后台续接先走普通终端路径**：目前 Orca 后端尚未接入自动唤醒。
+5. **明确交付边界并开启事件续接**：派发后让 Codex 结束当前轮，Claude 交付或求助再续接；减少反复询问“现在做完了吗”。
 
 [完整最佳实践与可复制任务模板](./docs/最佳实践.md)
 
@@ -112,6 +128,7 @@ codex plugin add claude-code@codex-claude-bridge
 | [快速开始](./docs/快速开始.md) | 第一次安装、首次任务、常见问题 |
 | [最佳实践](./docs/最佳实践.md) | 任务分派、并行、模型、交接与验收 |
 | [功能与限制](./docs/功能与限制.md) | 核对已实现、已验证与尚未接入的能力 |
+| [协作档位与用量](./docs/协作档位与用量.md) | 切档、短交付、历史读取与用量口径 |
 | [开发指南](./docs/开发指南.md) | 修改代码、运行检查或发布版本 |
 
 问题与建议通过 [Issues](https://github.com/lordfine/codex-claude-bridge/issues) 提交，附版本与脱敏复现步骤。

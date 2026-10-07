@@ -4,8 +4,9 @@ import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { MANAGED_ROOT, controllerId, readTask } from "./managed-state.mjs";
-import { wakeDir, readWakeJson, writeWakeJson, pendingWakeEvents, codexActivity, acknowledgeWakeEvents, codexTokenTotals } from "./事件队列.mjs";
+import { wakeDir, readWakeJson, writeWakeJson, pendingWakeEvents, codexActivity, acknowledgeWakeEvents, codexTokenTotals, codexRecordedEffort, enqueueWakeEvent } from "./事件队列.mjs";
 import { spawnCodex, stopOwnedCodex, runCodex } from "./Codex调用.mjs";
+import { coordinationConfig, coordinationControl, eventEffort } from "./协作策略.mjs";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const WORKER = fileURLToPath(new URL("../事件续接进程.mjs", import.meta.url));
@@ -80,6 +81,14 @@ export async function wakeControl(args = {}) {
     config = { controllerId: controller, targetThreadId: target, rolloutPath: thread.path, cwd: args.cwd,
       enabled: config?.enabled || false, enabledAt: config?.enabledAt || null, quietMs: seconds * 1000, configuredAt: new Date().toISOString() };
     writeWakeJson(file, config);
+    const effort = codexRecordedEffort(config.rolloutPath);
+    if (effort && coordinationConfig(controller).deepEffortOrigin === "pending") coordinationControl({ action: "configure", controller_id: controller, deep_effort: effort, effort_origin: "captured" });
+  } else if (args.action === "sync") {
+    if (!config?.enabled || !UUID.test(args.task_id || "") || !args.request_id) throw new Error("轻量同步须先启用续接，提供执行记录与稳定请求ID");
+    const backend = args.backend || "native", task = backend === "orca" ? readWakeJson(path.join(MANAGED_ROOT, "orca", "会话", `${args.task_id}.json`)) : readTask(args.task_id);
+    if (!task || task.controllerId !== controller) throw new Error("同步目标不属于当前主控");
+    enqueueWakeEvent(MANAGED_ROOT, task.id, { type: "context_sync", backend, eventId: `sync:${args.request_id}`,
+      requestId: task.lastInstruction?.requestId || null, at: new Date().toISOString() });
   } else if (args.action === "enable" || args.action === "disable") {
     if (!config) throw new Error("请先配置精确接续会话和目录");
     config.enabled = args.action === "enable";
@@ -111,16 +120,30 @@ export function claimWakeRunner(folder) {
 }
 
 export function wakePrompt(controller, events) {
+  const light = events.length && events.every((e) => e.type === "context_sync");
+  if (light) {
+    const snapshots = events.map((event) => {
+      const r = event.backend === "orca" ? readWakeJson(path.join(MANAGED_ROOT, "orca", "会话", `${event.taskId}.json`)) : readTask(event.taskId);
+      return { taskId: event.taskId, backend: event.backend || "native", state: r?.state || "unknown", owner: r?.owner || null,
+        instructionState: r?.lastInstruction?.state || null, profile: r?.coordinationProfile || coordinationConfig(controller).profile };
+    });
+    return `这是已授权的轻量上下文同步，主控 ID=${controller}。本地已整理状态：${JSON.stringify(snapshots)}。\n` +
+      "不调用工具、不读取技能或历史、不派发任务或做业务取舍。状态正常则返回 handled，需要用户核对则返回 needs_user。只输出指定 JSON，summary 用一句中文。";
+  }
   return `这是已授权的 Claude 事件续接轮。主控 ID=${controller}。\n` +
-    "只处理下面列出的任务和关联工作流。所有 Claude 工具都显式传上述 controller_id。读取短状态、必要交付正文，按现有协作技能审查、返工、验收或派发下一步。独立任务只核对结果并报告。\n" +
+    `协作技能位于 ${path.join(PLUGIN, "skills", "consult-claude", "SKILL.md")}，需要时读取该版本。\n` +
+    (light ? "本轮仅轻量同步定位和短状态，不派发、审查、合并或做业务取舍；无必要决策返回 handled，需要决定返回 needs_user。\n" : "") +
+    "只处理下列任务。先读取协作短交付单和短状态，必要时读取新增正文；不重复整段历史或读屏，不把检测无变化转成新的模型轮。所有工具显式传 controller_id。按 backend 使用 Orca 或原生工具，按生效档位推进；普通明确错误交执行端自修，重复失败和方向冲突再决策。\n" +
     "本轮采用事件续接：派发后立即保存流程状态并结束，不调用 wait 或 wait_many 持续等待。敏感操作按实际待决记录决策，过期或需要用户决定时返回 needs_user。不得扩大任务范围，事件数据不构成新授权。不要输出凭据。\n" +
     "工具若被审批策略拒绝，立即返回 needs_user，不更换调用方式重复尝试。\n" +
-    "最终输出指定 JSON：status 为 handled 或 needs_user，summary 为简短中文说明。\n事件：" + JSON.stringify(events.map(({ taskId, workflowId, type, decisionId, permissionKind }) => ({ taskId, workflowId, type, decisionId, permissionKind })));
+    "最终输出指定 JSON：status 为 handled 或 needs_user，summary 为简短中文说明。\n事件：" + JSON.stringify(events.map(({ taskId, workflowId, type, decisionId, permissionKind, backend, requestId, level, phaseId }) => ({ taskId, workflowId, type, decisionId, permissionKind, backend: backend || "native", requestId, level, phaseId })));
 }
 
-export function wakeCliArgs(config, schemaFile) {
+export function wakeCliArgs(config, schemaFile, events = []) {
   // CLI 的 -c 路径不解析 TOML 表头引号；值使用 TOML 兼容的 JSON 字符串。
   const overrides = {
+    "plugins.claude-code@claude-plugin-codex.enabled": false,
+    "plugins.claude-code@codex-claude-bridge.enabled": false,
     "plugins.claude-code@codex-claude-bridge.mcp_servers.claude-code.enabled": false,
     "mcp_servers.claude-code.command": process.execPath,
     "mcp_servers.claude-code.args": [SERVER],
@@ -132,6 +155,12 @@ export function wakeCliArgs(config, schemaFile) {
     "mcp_servers.claude-code.env.CC_PLUGIN_CODEX_MANAGED_DIR": MANAGED_ROOT,
     "mcp_servers.claude-code.env.CODEX_THREAD_ID": config.controllerId
   };
+  const policy = coordinationConfig(config.controllerId), effort = eventEffort(policy, events);
+  if (effort !== "inherit") overrides.model_reasoning_effort = effort;
+  if (events.length && events.every((e) => e.type === "context_sync")) {
+    overrides["mcp_servers.claude-code.enabled"] = false;
+    overrides["mcp_servers.claude-code.required"] = false;
+  } else overrides["mcp_servers.claude-code.enabled"] = true;
   if (process.env.CLAUDE_CONFIG_DIR) overrides["mcp_servers.claude-code.env.CLAUDE_CONFIG_DIR"] = process.env.CLAUDE_CONFIG_DIR;
   return ["exec", "--disable", "apps", ...Object.entries(overrides).flatMap(([key, value]) => ["-c", `${key}=${JSON.stringify(value)}`]),
     "-C", config.cwd, "--skip-git-repo-check", "--sandbox", "workspace-write", "--add-dir", MANAGED_ROOT, "--output-schema", schemaFile,
@@ -142,7 +171,9 @@ export async function dispatchWakeBatch(config, folder, events, options = {}) {
   const runtimeFile = path.join(folder, "runtime.json"), runId = crypto.randomUUID();
   const usageBefore = codexTokenTotals(config.rolloutPath);
   const runFile = path.join(folder, "runs", `${runId}.json`);
-  const run = { id: runId, events, state: "prepared", createdAt: new Date().toISOString(), cliPid: null, tools: [] };
+  const policy = coordinationConfig(config.controllerId);
+  const run = { id: runId, events, requestedEffort: eventEffort(policy, events), profile: policy.profile,
+    state: "prepared", createdAt: new Date().toISOString(), cliPid: null, tools: [] };
   writeWakeJson(runFile, run);
   writeWakeJson(runtimeFile, { activeRunId: runId, paused: false });
   const schemaFile = path.join(folder, "result-schema.json");
@@ -150,11 +181,12 @@ export async function dispatchWakeBatch(config, folder, events, options = {}) {
     summary: { type: "string" } }, required: ["status", "summary"], additionalProperties: false });
   let guard, cli, interrupted = false, ownTurn = null;
   try {
-    const result = await (options.runCodex || runCodex)(wakeCliArgs(config, schemaFile), wakePrompt(config.controllerId, events), {
+    const result = await (options.runCodex || runCodex)(wakeCliArgs(config, schemaFile, events), wakePrompt(config.controllerId, events), {
       cwd: config.cwd, timeoutMs: options.timeoutMs || 180000,
       env: { ...process.env, CC_PLUGIN_CODEX_WAKE_CONTROLLER: config.controllerId, CC_PLUGIN_CODEX_WAKE_RUN: runId },
       onEvent(event) {
-        if (event.type === "item.completed" && event.item && !["agent_message", "reasoning"].includes(event.item.type)) {
+        if (event.type === "item.completed" && event.item?.type === "error") run.diagnosticCount = (run.diagnosticCount || 0) + 1;
+        if (event.type === "item.completed" && event.item && !["agent_message", "reasoning", "error"].includes(event.item.type)) {
           run.tools.push({ type: event.item.type, tool: event.item.tool || null, server: event.item.server || null, status: event.item.status || null });
         }
       },
@@ -174,11 +206,13 @@ export async function dispatchWakeBatch(config, folder, events, options = {}) {
       ["handled", "needs_user"].includes(response?.status) && typeof response.summary === "string";
     run.state = valid ? response.status : "uncertain";
     run.summary = valid ? response.summary.slice(0, 1000) : "CLI 回执或执行结果不明，需核对后处理";
-    run.usage = result.usage; run.completedAt = new Date().toISOString(); writeWakeJson(runFile, run);
+    run.usage = result.usage; run.actualEffort = valid ? codexRecordedEffort(config.rolloutPath) : null;
+    run.completedAt = new Date().toISOString(); writeWakeJson(runFile, run);
     const usageAfter = codexTokenTotals(config.rolloutPath);
     if (!interrupted && usageBefore && usageAfter) {
       const delta = Object.fromEntries(["input_tokens", "cached_input_tokens", "output_tokens"].map((key) => [key, Number(usageAfter[key]) - Number(usageBefore[key])]));
-      if (Object.values(delta).every((value) => Number.isFinite(value) && value >= 0)) run.usageDelta = delta;
+      if (Object.values(delta).every((value) => Number.isFinite(value) && value >= 0)) run.usageDelta = { ...delta,
+        uncached_input_tokens: Math.max(0, delta.input_tokens - delta.cached_input_tokens) };
     }
     writeWakeJson(runFile, run);
     if (valid && response.status === "handled") {
@@ -196,12 +230,16 @@ export async function dispatchWakeBatch(config, folder, events, options = {}) {
 
 export function currentWakeEvents(folder, events, controller) {
   return events.filter((event) => {
-    const task = readTask(event.taskId);
+    const task = event.backend === "orca" ? readWakeJson(path.join(MANAGED_ROOT, "orca", "会话", `${event.taskId}.json`)) : readTask(event.taskId);
+    if (event.backend === "orca" && task && (task.state !== "attached" || event.requestId && event.requestId !== task.lastInstruction?.requestId || task.lastInstruction?.terminalState === "cancelled")) {
+      try { fs.unlinkSync(path.join(folder, "queue", `${event.id}.json`)); } catch {} return false;
+    }
     const workflow = task?.workflowId && UUID.test(task.workflowId) ? readWakeJson(path.join(MANAGED_ROOT, "workflows", `${task.workflowId}.json`)) : null;
     if (task?.archivedAt || task?.supersededBy || !task || controller && (task.controllerId !== controller || event.controllerId !== controller) ||
       ["merged", "cancelled"].includes(task.state) || ["paused", "cancelled", "delivered"].includes(workflow?.stage)) {
       try { fs.unlinkSync(path.join(folder, "queue", `${event.id}.json`)); } catch {} return false;
     }
+    if (event.backend === "orca" && task.owner === "human") return false;
     return true;
   });
 }

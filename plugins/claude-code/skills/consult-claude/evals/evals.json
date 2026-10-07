@@ -1,0 +1,8 @@
+{
+  "skill_name": "consult-claude",
+  "evals": [
+    {"id": 1, "name": "无变化阶段", "prompt": "继续指挥当前 Orca 的前端修复，默认协作档位。后台事件续接已启用；状态 revision=r7，after_revision=r7，unchanged=true，Claude仍在实现，没有失败或求助。下一步怎么做？", "expected_output": "保持默认中频，结束当前协调轮，让本地观察继续；不轮询、不重复读屏、不重新派发。", "files": [], "expectations": ["profile为medium", "不安排sleep/read/status重复循环", "不派发新的实现指令", "next_action为end_turn"]},
+    {"id": 2, "name": "低频异常与验收", "prompt": "这项工作用低频。Claude 刚完成一个普通子任务，随后报告同类测试重复失败并需要方向决策；屏幕说空闲，但后台停止尚未证明，当前交付快照也已变化。给出下一步协作动作。", "expected_output": "低频普通子任务不介入；重复失败及时升级并保留深思考；核对稳定快照，不合并、不把空闲当停止。", "files": [], "expectations": ["profile为low", "普通子任务不触发主控", "重复失败及时升级", "不宣称所有后台已停止", "不直接合并"]},
+    {"id": 3, "name": "历史与实时分页", "prompt": "我只想读这个 Claude 会话昨天的交付和现在新增内容，不接管、不发送指令。原目录和精确 UUID 已给出。已有历史 nextCursor={offset:8192,generation:g1,character:120}；屏幕 nextCursor一直是103但画面在变。你应该怎样读取？", "expected_output": "使用只读历史接口和字节/字符游标，实时用revision/增量；不接入或发送，不用屏幕103当正文游标。", "files": [], "expectations": ["使用delegate_history", "保留字节/字符正文游标", "不接管或发送", "不以屏幕游标代表正文游标"]}
+  ]
+}

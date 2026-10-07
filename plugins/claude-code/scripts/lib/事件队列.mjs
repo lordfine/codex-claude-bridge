@@ -1,10 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import { shouldWake } from "./协作策略.mjs";
 
 export const WAKE_EVENTS = new Set(["instruction_completed", "instruction_failed", "StopFailure", "needs_input",
   "permission_pending", "permission_to_human", "process_exit", "recovery_failed", "recovery_exhausted", "session_start_blocked", "handback",
-  "recovery_uncertain", "recovery_interrupted_instruction", "broker_lost_claude_alive", "config_changed", "time_limit_reached", "turn_limit_reached"]);
+  "recovery_uncertain", "recovery_interrupted_instruction", "broker_lost_claude_alive", "config_changed", "time_limit_reached", "turn_limit_reached", "stage_delivered", "context_sync", "cancel_uncertain", "direction_changed"]);
 export function wakeDir(root, controller) {
   return path.join(root, "wake", crypto.createHash("sha256").update(String(controller)).digest("hex").slice(0, 32));
 }
@@ -16,8 +17,11 @@ export function writeWakeJson(file, value) {
 }
 export function enqueueWakeEvent(root, taskId, event) {
   if (!WAKE_EVENTS.has(event.type) || event.type === "StopFailure" && event.agentId) return false;
-  const task = readWakeJson(path.join(root, "tasks", taskId, "task.json"));
+  const backend = event.backend || "native";
+  const task = backend === "orca" ? readWakeJson(path.join(root, "orca", "会话", `${taskId}.json`)) : readWakeJson(path.join(root, "tasks", taskId, "task.json"));
   if (!task?.controllerId || task.archivedAt || task.supersededBy || ["merged", "cancelled"].includes(task.state)) return false;
+  if (backend === "orca" && task.state !== "attached") return false;
+  if (!shouldWake(task, event) && event.type !== "context_sync") return false;
   if (task.workflowId && /^[0-9a-f-]{36}$/i.test(task.workflowId)) {
     const workflow = readWakeJson(path.join(root, "workflows", `${task.workflowId}.json`));
     if (["paused", "cancelled", "delivered"].includes(workflow?.stage)) return false;
@@ -29,6 +33,7 @@ export function enqueueWakeEvent(root, taskId, event) {
   if (fs.existsSync(file) || fs.existsSync(path.join(folder, "ack", `${id}.json`))) return true;
   // 不向调度器复制任务正文、工具参数、凭据路径或 Claude 回复。
   writeWakeJson(file, { id, eventId: event.eventId, taskId, controllerId: task.controllerId,
+    backend, requestId: event.requestId || null, level: event.level || null, phaseId: event.phaseId || null, requiresDecision: event.requiresDecision === true,
     workflowId: task.workflowId || null, type: event.type, at: event.at,
     decisionId: event.decisionId || null, permissionKind: event.kind || null });
   return true;
@@ -106,4 +111,17 @@ export function codexTokenTotals(file) {
     }
   } catch {}
   return null;
+}
+
+export function codexRecordedEffort(file) {
+  try {
+    const stat = fs.statSync(file), length = Math.min(stat.size, 4_000_000), bytes = Buffer.alloc(length), fd = fs.openSync(file, "r");
+    try { fs.readSync(fd, bytes, 0, length, stat.size - length); } finally { fs.closeSync(fd); }
+    const lines = bytes.toString("utf8").split("\n"); if (length < stat.size) lines.shift();
+    for (let i = lines.length - 1; i >= 0; i--) {
+      let entry; try { entry = JSON.parse(lines[i]); } catch { continue; }
+      const effort = entry.type === "turn_context" ? entry.payload?.effort : null;
+      if (["low", "medium", "high", "xhigh", "max", "ultra"].includes(effort)) return effort;
+    }
+  } catch {} return null;
 }

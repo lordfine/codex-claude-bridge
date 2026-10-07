@@ -16,6 +16,8 @@ import { wakeControl } from "./lib/事件续接.mjs";
 import { orcaSessions } from "./lib/Orca会话.mjs";
 
 import { TOOLS } from "./lib/工具定义.mjs";
+import { coordinationControl } from "./lib/协作策略.mjs";
+import { readHistory } from "./lib/会话读取.mjs";
 
 const SERVER_NAME = "claude-code";
 const SERVER_VERSION = JSON.parse(fs.readFileSync(new URL("../.codex-plugin/plugin.json", import.meta.url), "utf8")).version;
@@ -85,7 +87,9 @@ async function handleMessage(message) {
         delegate_manage: async (args) => managedResult(await manageTasks(args)),
         delegate_sessions: (args) => managedResult(sessionTools(args)),
         delegate_wake: async (args) => managedResult(await wakeControl(args)),
-        delegate_orca: async (args) => managedResult(await orcaSessions(args))
+        delegate_orca: async (args) => managedResult(await orcaSessions(args)),
+        delegate_coordination: (args) => managedResult(coordinationControl(args)),
+        delegate_history: (args) => managedResult(readHistory(args))
       };
 
   const handler = Object.hasOwn(handlers, params?.name) && handlers[params.name];
@@ -95,7 +99,7 @@ async function handleMessage(message) {
     const result = await handler(params?.arguments ?? {});
     if (!cancelled.has(id)) reply(id, result);
   } catch (error) {
-    if (!cancelled.has(id)) reply(id, { content: [{ type: "text", text: "工具执行失败：" + (error?.message ?? String(error)) }], isError: true });
+    if (!cancelled.has(id)) reply(id, { content: [{ type: "text", text: JSON.stringify({ error: { code: error.code || "TOOL_ERROR", message: error?.message ?? String(error), ...error.details } }) }], isError: true });
   } finally { active.delete(id); cancelled.delete(id); }
 }
 

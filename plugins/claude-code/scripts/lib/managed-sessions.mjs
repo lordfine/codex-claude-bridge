@@ -75,6 +75,7 @@ export function attachSession(args = {}, sourceTask) {
   if (args.existing_idle_confirmed !== true) throw new Error("须先结束原 Claude 进程并确认，再按精确会话 ID 接入");
   selectedSession(sessionId, cwd);
   const created = createManagedTask({ ...args, session_id: sessionId, cwd,
+    profile: args.profile || sourceTask?.coordinationProfile || undefined,
     existing_idle_confirmed: true, reused_from_task_id: sourceTask?.id || null,
     attach_request_id: args.request_id, attach_signature: args.attach_signature, attach_alias: args.alias,
     ...(sourceTask?.kind === "review" ? { kind: "review", review_of: sourceTask.reviewOf, review_ref: sourceTask.reviewRef } : {}) });
