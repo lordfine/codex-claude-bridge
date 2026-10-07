@@ -1,0 +1,17 @@
+{
+  "name": "codex-claude-bridge",
+  "version": "0.17.0",
+  "private": true,
+  "type": "module",
+  "description": "Codex 指挥 Claude Code 完成可恢复的实现、审查、返工与验收流程。",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node scripts/运行测试.mjs"
+  },
+  "dependencies": {
+    "node-pty": "^1.1.0"
+  }
+}

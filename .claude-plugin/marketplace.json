@@ -1,0 +1,20 @@
+{
+  "name": "codex-claude-bridge",
+  "interface": {
+    "displayName": "Codex 与 Claude 协作桥接"
+  },
+  "plugins": [
+    {
+      "name": "claude-code",
+      "source": {
+        "source": "local",
+        "path": "./plugins/claude-code"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
