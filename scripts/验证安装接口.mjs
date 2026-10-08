@@ -59,7 +59,7 @@ try {
     if (!tools.result.tools.some((tool) => tool.name === name)) throw new Error(`缺少工具 ${name}`);
   }
   const setup = await call("setup", { deep: false });
-  if (!setup.ready) throw new Error("准备检查未通过");
+  if (!setup.ready) throw new Error(fixture ? JSON.stringify({ 准备检查失败: true, claude: setup.claude, terminal: setup.terminal }) : "准备检查未通过");
   const cwd = fileURLToPath(new URL("..", import.meta.url));
   const created = await call("delegate_workflow", { action: "create", cwd, goal: "安装接口检查，不派发模型任务", request_id: "安装创建" });
   const restored = await call("delegate_workflow", { action: "status", workflow_id: created.id });
