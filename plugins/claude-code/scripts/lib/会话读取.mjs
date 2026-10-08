@@ -24,13 +24,22 @@ const systemTaskOrigin = (entry) => entry.origin?.kind === "task-notification" &
 export function taskNotification(entry) {
   const note = entry.attachment || entry.data;
   if (note?.type === "task_notification") return note;
-  if (!systemTaskOrigin(entry)) return null;
+  if (!systemTaskOrigin(entry) && !entry.isMeta) return null;
   const text = normalizedText(entryText(entry));
   if (!/^<task-notification(?:\s[^<>]*)?>[\s\S]*<\/task-notification>$/.test(text)) return null;
   // 只读通知头，不把 result 中的正文当元数据或新指令。
-  const header = text.split(/<result(?:\s[^<>]*)?>/)[0];
-  const field = (name) => header.match(new RegExp(`<${name}>([^<>\\r\\n]{1,160})</${name}>`))?.[1]?.trim();
-  return { type: "task_notification", taskId: field("task-id"), toolUseId: field("tool-use-id"), status: field("status") };
+  const header = text;
+  const values = {}, stack = [], starts = {};
+  for (const match of header.matchAll(/<(\/?)([a-z][a-z0-9-]*)(?:\s[^<>]*)?>/gi)) {
+    const [, closing, name] = match;
+    if (!closing && stack.length === 1 && name === "result") break;
+    if (!closing) { if (stack.length === 1 && ["task-id", "tool-use-id", "status"].includes(name)) starts[name] = match.index + match[0].length; stack.push(name); }
+    else if (stack.at(-1) === name) {
+      if (stack.length === 2 && starts[name] !== undefined) { const value = header.slice(starts[name], match.index).trim(); if (value.length <= 160 && !/[<>\r\n]/.test(value)) values[name] ||= value; }
+      stack.pop();
+    }
+  }
+  return { type: "task_notification", taskId: values["task-id"], toolUseId: values["tool-use-id"], status: values.status };
 }
 export function entryText(entry, tools = false) {
   const content = entry.message?.content;
@@ -45,7 +54,7 @@ export function entryText(entry, tools = false) {
 export function messageOrigin(entry) {
   const content = entry.message?.content;
   if (Array.isArray(content) && content.some((p) => p.type === "tool_result")) return "tool_result";
-  if ((entry.attachment || entry.data)?.type === "task_notification") return "task_notification";
+  if (taskNotification(entry)) return "task_notification";
   if (systemTaskOrigin(entry)) return "task_notification";
   const text = normalizedText(entryText(entry));
   // 兼容 Claude 的完整系统投递包装；普通聊天中引用标签不按通知处理。
@@ -134,6 +143,7 @@ export function observeInstruction(sessionId, cwd, instruction, saved = {}) {
       }
     }
     if (result.logged && e.type === "assistant") {
+      result.started = true; result.firstAssistantUuid ||= e.uuid || null;
       const text = entryText(e), hasTools = (e.message?.content || []).some?.((part) => part.type === "tool_use");
       if (hasTools) result.completed = false;
       for (const part of Array.isArray(e.message?.content) ? e.message.content : []) {
@@ -160,7 +170,7 @@ export function observeInstruction(sessionId, cwd, instruction, saved = {}) {
   result.backgroundOutstanding = Boolean(Object.keys(result.background || {}).length);
   result.hasMore = scan.hasMore && !result.ambiguous; result.awaitingData = scan.awaitingData; result.truncated = false;
   if (scan.changed || result.gap || result.ambiguous) result.completed = false;
-  result.revision = hash(JSON.stringify([result.logged, result.completed, result.failed, result.ambiguous, result.cursor, result.text]));
+  result.revision = hash(JSON.stringify([result.logged, result.started, result.completed, result.failed, result.ambiguous, result.cursor, result.text]));
   return result;
 }
 

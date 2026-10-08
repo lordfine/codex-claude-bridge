@@ -5,7 +5,7 @@ import { shouldWake } from "./协作策略.mjs";
 
 export const WAKE_EVENTS = new Set(["instruction_completed", "instruction_failed", "StopFailure", "needs_input",
   "permission_pending", "permission_to_human", "process_exit", "recovery_failed", "recovery_exhausted", "session_start_blocked", "handback",
-  "recovery_uncertain", "recovery_interrupted_instruction", "broker_lost_claude_alive", "config_changed", "time_limit_reached", "turn_limit_reached", "stage_delivered", "context_sync", "cancel_uncertain", "direction_changed", "human_prompt_completed", "binding_stale", "draft_blocked", "draft_cleared"]);
+  "recovery_uncertain", "recovery_interrupted_instruction", "broker_lost_claude_alive", "config_changed", "time_limit_reached", "turn_limit_reached", "stage_delivered", "context_sync", "cancel_uncertain", "direction_changed", "human_prompt_completed", "binding_stale", "draft_blocked", "draft_cleared", "activity_stalled"]);
 export function wakeDir(root, controller) {
   return path.join(root, "wake", crypto.createHash("sha256").update(String(controller)).digest("hex").slice(0, 32));
 }

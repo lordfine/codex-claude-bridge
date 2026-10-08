@@ -9,7 +9,7 @@ export const PROFILES = { high: 1, medium: 2, low: 3 };
 const LEVELS = { subtask: 1, milestone: 2, batch: 3, review: 3, final: 3 };
 const URGENT = new Set(["instruction_failed", "StopFailure", "needs_input", "permission_pending", "permission_to_human",
   "recovery_uncertain", "recovery_failed", "recovery_exhausted", "session_start_blocked", "broker_lost_claude_alive", "config_changed",
-  "time_limit_reached", "turn_limit_reached", "process_exit", "cancel_uncertain", "direction_changed", "binding_stale", "draft_blocked", "draft_cleared"]);
+  "time_limit_reached", "turn_limit_reached", "process_exit", "cancel_uncertain", "direction_changed", "binding_stale", "draft_blocked", "draft_cleared", "activity_stalled"]);
 const hash = (value) => crypto.createHash("sha256").update(String(value)).digest("hex");
 export const isUrgentEvent = (event) => URGENT.has(event.type);
 const configFile = (master) => path.join(MANAGED_ROOT, "coordination", `${hash(master)}.json`);
@@ -26,7 +26,8 @@ export function coordinationConfig(master) {
 export function effectiveProfile(task) { return task.coordinationProfile || coordinationConfig(task.controllerId).profile; }
 export function shouldWake(task, event) {
   if (URGENT.has(event.type)) return true;
-  if (["instruction_completed", "handback", "human_prompt_completed"].includes(event.type)) return true;
+  if (event.type === "instruction_completed") return (LEVELS[event.level || task.lastInstruction?.deliveryLevel || "batch"] || 0) >= PROFILES[effectiveProfile(task)];
+  if (["handback", "human_prompt_completed"].includes(event.type)) return true;
   if (event.type !== "stage_delivered") return false;
   if (event.requiresDecision === true) return true;
   return (LEVELS[event.level] || 0) >= PROFILES[effectiveProfile(task)];

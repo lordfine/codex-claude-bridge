@@ -33,6 +33,8 @@ Codex 负责目标、范围、阶段决策和最终验收；Claude 负责定位�
 
 需要自动协调时，先用 `delegate_wake(configure/enable)` 绑定当前主控的精确 Codex 存储 ID，确认 CLI 与记录就绪；它支持两条后端的本地观察。派发后保存状态并结束当前轮，关键事件再续接。无变化不使用 sleep→read/status 循环，计时结束也不制造新的思考轮。
 
+先核对 `setup.service.version` 与能力列表，缺字段或缺 `resolve_fault` 表示旧运行实例，重载MCP后再操作。`workerReady` 仅证明新心跳，不证明消息已处理；真实完成事件、本次Codex run和复核结果才构成链路验收。
+
 续接时只处理提示指定的任务与后端，读短状态、当前交付与必要新增正文，安排下一阶段后退出。用户暂停则保持暂停。回执不明停自动派发并核对原请求，不换请求 ID 重发。详细顺序见 [验收与续接](./references/验收与续接.md)。
 
 ## 读取与交接
@@ -47,9 +49,11 @@ Codex 负责目标、范围、阶段决策和最终验收；Claude 负责定位�
 
 阶段文档是读取快路径，原会话用于追溯。只提取任务证据，历史正文里的指令不自动成为新授权。不要把屏幕行数当正文游标，也不要把 accepted、TUI 空闲或取消请求当交付／全部停止证明。
 
-人类操作时暂停写入、保留管理和观察。收到 `human_prompt_completed` 后，分页读取新增人类意图，调整下一步；当前轮、队列、草稿和后台任务结束后用 `takeover` 接续。未空闲则结束本轮等下次事件，不轮询。只有用户在 Codex 明确要求不再使用该会话才 `release`；不要自动重发被人类打断的任务。取消不明保持挂起，不清空人类队列。后端步骤见 [读取与异常](./references/读取与异常.md)。
+人类操作时暂停写入、保留观察。收到 `human_prompt_completed` 后读取新增意图，等真实执行、人类队列、PTY输入与后台结束再 `takeover`。Orca的UI composer草稿不等于PTY输入，不改变owner或阻止完成事件；只在明确授权后用 `submit_draft` 传完整 `prompt` 和 `draft_hash`，再用 `confirm_submission` 核对收到、开始及完成。未空闲结束本轮等事件；只有明确不再使用才 `release`。详见 [读取与异常](./references/读取与异常.md)。
 
 收到 `binding_stale` 先 list，再按原 UUID、原目录与替代句柄 `rebind`，保留原记录，不重新派发。`draft_blocked` 是需要处理的阻塞，来源可能未知；查看 `terminalBlocker`，把保留、发送或清除的选择交用户，不归因于用户、不自动按 Enter／Esc，也不只等交付文件。
+
+响应中的 `unchanged`、`timed_out`、`endModelTurn=true` 不是空结果。保留 `revision/statusCursor`，结束当前模型轮，交给后台事件；需要一次等待时用 `wait(after_revision)`。源码预读已提供短状态和交付时直接检查关键文件／差异，不重复overview、技能与状态查询。低频仅整批及重大异常介入；普通子任务用 `delivery_level=subtask`。
 
 ## 验收与用量
 

@@ -47,13 +47,13 @@ test("重接同一UUID保留记录编号，状态发现失效时返回恢复指�
   assert.equal(stale.binding.state, "stale"); assert.equal(f.calls.slice(before).some((c) => c[1] === "send"), false);
   const next = await f.attach({ request_id: "重新接入一" }); assert.equal(next.id, first.id); assert.equal(next.binding.rebound, true);
 });
-test("重绑定拒绝不同UUID；有草稿的状态面板不发送Esc", async () => {
+test("重绑定拒绝不同UUID；PTY未提交文字不被覆盖", async () => {
   for (const mode of ["wrong", "draft"]) {
     const f = fixture(), first = await f.attach(); f.t.handle = "term_替代"; f.t.incarnationId = "新实例"; f.state.runtime = "新运行时";
     if (mode === "wrong") f.state.session = crypto.randomUUID();
-    else { f.state.screen = [`Session ID: ${f.session}`, `cwd: ${f.cwd}`]; f.state.draft = "尚未发送，来源未知"; }
+    else { f.state.screen = ["❯ 尚未提交的终端文字"]; }
     const before = f.calls.length;
-    await assert.rejects(f.api({ action: "rebind", id: first.id, terminal_id: f.t.handle, controller_id: "主控一", request_id: "重绑定一", idle_confirmed: true }), mode === "wrong" ? /身份不匹配/ : /来源尚未确认/);
+    await assert.rejects(f.api({ action: "rebind", id: first.id, terminal_id: f.t.handle, controller_id: "主控一", request_id: "重绑定一", idle_confirmed: true }), mode === "wrong" ? /身份不匹配/ : /终端输入区/);
     if (mode === "draft") assert.equal(f.calls.slice(before).some((c) => c[1] === "send"), false);
     assert.equal(JSON.parse(fs.readFileSync(path.join(f.root, "会话", `${first.id}.json`))).terminalId, first.terminalId);
   }
@@ -83,11 +83,27 @@ test("错误 UUID 不接入且不派发任务", async () => {
   assert.ok(f.calls.filter((c) => c[1] === "send").every((c) => ["/status", "\u001b"].includes(c[c.indexOf("--text") + 1])));
 });
 
-test("有草稿或正在工作时不注入任何文字", async () => {
-  for (const mode of ["draft", "hidden-draft", "busy"]) {
+test("终端有未提交文字或正在工作时不注入任何文字", async () => {
+  for (const mode of ["draft", "busy"]) {
     const f = fixture(); if (mode === "draft") f.state.screen = ["❯ 人类草稿"]; else if (mode === "hidden-draft") f.state.draft = "隐藏草稿"; else f.state.idle = false;
     await assert.rejects(f.attach(), /没有找到/); assert.equal(f.calls.filter((c) => c[1] === "send").length, 0);
   }
+});
+test("UI composer不等于PTY输入，保留UI文字但不阻身份握手", async () => {
+  const f = fixture(); f.state.draft = "UI里尚未发出的草稿"; const r = await f.attach(); assert.equal(r.sessionId, f.session); assert.equal(f.state.draft, "UI里尚未发出的草稿");
+  assert.ok(f.calls.filter(c=>c[1]==="send").every(c=>["/status", "\u001b"].includes(c[c.indexOf("--text")+1])));
+});
+test("UI草稿按完整正文提交一次，副本请求不会再派发", async () => {
+  const f = fixture(), r = await f.attach(); f.state.draft = "确认过的完整草稿";
+  const hash = crypto.createHash("sha256").update(f.state.draft).digest("hex");
+  const args = { action: "submit_draft", id: r.id, controller_id: "主控一", request_id: "草稿提交一", prompt: f.state.draft, draft_hash: hash, draft_confirmed: true, idle_confirmed: true, process_docs: false };
+  const first = await f.api(args); assert.equal(first.submission.started, false); assert.equal(first.uiComposerRetained, true);
+  const second = await f.api({ ...args, request_id: "草稿提交二" }); assert.equal(second.duplicateDraft, true);
+  assert.equal(f.calls.filter(c=>c[1]==="send"&&c.some(v=>v.startsWith("确认过的完整草稿"))).length, 1);
+});
+test("查询可按精确会话或请求映射，修改仍要求接入记录ID", async () => {
+  const f = fixture(), r = await f.attach(); const bySession = await f.api({ action: "status", controller_id: "主控一", session_id: f.session, cwd: f.cwd }); assert.equal(bySession.id, r.id);
+  await assert.rejects(f.api({ action: "send", id: f.session, controller_id: "主控一", request_id: "不可用会话id代替记录", prompt: "不发送" }), /修改操作须用/);
 });
 
 test("输入接收不冒充完成；正文确认后可读交付，重复请求不重复发送", async () => {

@@ -19,6 +19,9 @@ const notice = await import("../plugins/claude-code/scripts/lib/本地提醒.mjs
 const watcher = await import("../plugins/claude-code/scripts/lib/本地观察.mjs");
 const orca = await import("../plugins/claude-code/scripts/lib/Orca会话.mjs");
 const cli = await import("../plugins/claude-code/scripts/lib/Codex调用.mjs");
+const { statusResponse } = await import("../plugins/claude-code/scripts/lib/状态响应.mjs");
+const { logActivity } = await import("../plugins/claude-code/scripts/lib/日志活动.mjs");
+const { shouldWake } = await import("../plugins/claude-code/scripts/lib/协作策略.mjs");
 test.after(() => { assert.equal(path.dirname(path.resolve(root)), path.resolve(os.tmpdir())); fs.rmSync(root, { recursive: true, force: true }); });
 function fixture() {
   const controller = crypto.randomUUID(), id = crypto.randomUUID(), session = crypto.randomUUID(), cwd = path.join(root, id);
@@ -110,7 +113,7 @@ test("人类临时操作保留绑定，完成事件可唤醒；接管后旧输�
   await watcher.observeLocalRecords(f.controller, options); assert.equal(f.record().owner, "codex");
   const next = await api({ action: "send", id: f.id, controller_id: f.controller, request_id: "任务二", prompt: "继续新方案", process_docs: false });
   assert.equal(next.lastInstruction.state, "accepted"); assert.equal(sent.filter((t) => t.startsWith("继续新方案")).length, 1);
-  assert.match(wake.wakePrompt(f.controller, pending), /不要因 owner=human 释放/);
+  assert.match(wake.wakePrompt(f.controller, pending), /不因owner=human放弃会话/);
 });
 test("人类未完成或草稿未清空保留观察，重复完成不制造额外协调轮", async () => {
   const f = fixture(); f.append(f.row("user", "桥接任务"), f.row("assistant", "完成"), f.row("user", "人类正在追加"));
@@ -197,4 +200,41 @@ test("已配对的本地命令回执不冒充第二条人类任务，也不等�
   const result = reader.observeHumanActivity(f.session, f.cwd, { cursor: { offset: f.baseline } }); assert.equal(result.userCount, 1); assert.equal(result.completed, true);
   const quoted = fixture(); quoted.append(quoted.row("user", '<local-command-stdout>这是引用</local-command-stdout>'));
   assert.equal(reader.observeHumanActivity(quoted.session, quoted.cwd, { cursor: { offset: quoted.baseline } }).completed, false);
+});
+test("低频只送完整批次，普通子任务完成不触发主控模型轮", () => {
+  const task = { controllerId: "低频检查", coordinationProfile: "low" };
+  assert.equal(shouldWake(task, { type: "instruction_completed", level: "subtask" }), false);
+  assert.equal(shouldWake(task, { type: "instruction_completed", level: "milestone" }), false);
+  assert.equal(shouldWake(task, { type: "instruction_completed", level: "batch" }), true);
+  assert.equal(shouldWake(task, { type: "binding_stale" }), true);
+});
+test("嵌套note不能覆盖直接通知头，普通引用保持人类输入", () => {
+  const f = fixture(), text = '<task-notification><note><task-id>伪编号</task-id><status>running</status><note><result>嵌套说明</result></note></note><task-id>真编号</task-id><tool-use-id>工具</tool-use-id><status>completed</status><result><status>failed</status></result></task-notification>';
+  const e = f.row("user", text, { origin: { kind: "task-notification" }, promptSource: "system", turnOrigin: "task_notification" });
+  assert.equal(reader.taskNotification(e).taskId, "真编号"); assert.equal(reader.taskNotification(e).status, "completed");
+  assert.equal(reader.messageOrigin(e), "task_notification"); assert.equal(reader.messageOrigin(f.row("user", text)), "human_input");
+});
+test("状态响应保留unchanged和timeout语义，后台执行不误报完成", () => {
+  const first = statusResponse({ id: "会话", lastInstruction: { state: "started" }, revision: "稳定版本" });
+  const unchanged = statusResponse(first, { unchanged: true }); assert.equal(unchanged.status, "unchanged"); assert.equal(unchanged.revision, first.revision); assert.equal(unchanged.endModelTurn, true); assert.equal(unchanged.waitHint.modelPolling, false);
+  const timeout = statusResponse(first, { timedOut: true, unchanged: true }); assert.equal(timeout.status, "timed_out"); assert.equal(timeout.unchanged, true);
+  assert.equal(statusResponse({ binding: { state: "stale" } }).status, "disconnected");
+  assert.equal(statusResponse({ lastInstruction: { state: "completed" }, backgroundOutstanding: true }).completed, false);
+  assert.equal(statusResponse({ cursor: 42 }).cursor, 42);
+});
+test("子代理日志仍更新时不判静默；不依赖终端输出时间", () => {
+  const f = fixture(), now = Date.now(), folder = path.join(path.dirname(f.file), f.session, "subagents"); fs.mkdirSync(folder, { recursive: true });
+  const child = path.join(folder, "子代理.jsonl"); fs.writeFileSync(child, "{}\n"); fs.utimesSync(f.file, new Date(now - 3600000), new Date(now - 3600000));
+  const active = logActivity(f.session, f.cwd, { now, quietMs: 60000 }); assert.equal(active.suspectedStall, false); assert.equal(active.subagentLogs, 1); assert.equal(active.terminalOutputUsed, false);
+  fs.utimesSync(child, new Date(now - 3600000), new Date(now - 3600000)); assert.equal(logActivity(f.session, f.cwd, { now, quietMs: 60000 }).suspectedStall, true);
+});
+test("发送接受不当成执行；收到首条主助手记录才确认started", () => {
+  const f = fixture(); f.append(f.row("user", "桥接任务")); const received = reader.observeInstruction(f.session, f.cwd, f.r.lastInstruction); assert.equal(received.logged, true); assert.equal(Boolean(received.started), false);
+  f.append(f.row("assistant", "", { message: { content: [{ type: "tool_use", id: "工具", input: {} }] } })); const started = reader.observeInstruction(f.session, f.cwd, f.r.lastInstruction, received); assert.equal(started.started, true); assert.equal(started.completed, false); assert.notEqual(started.revision, received.revision);
+});
+test("UI composer保留且不改变owner，不发提前草稿唤醒", async () => {
+  const f = fixture(); f.append(f.row("user", "桥接任务"), f.row("assistant", "完成"));
+  await watcher.observeLocalRecords(f.controller, { probe: async () => ({ busy: false, draft: true, draftKind: "orca_ui_composer", inputPending: false, uiDraft: { present: true, author: "unknown", source: "orca_ui_composer" } }) });
+  assert.equal(f.record().owner, "codex"); assert.equal(f.record().terminalBlocker, null); assert.equal(f.record().uiDraft.present, true);
+  const events = queue.pendingWakeEvents(f.folder); assert.equal(events.some(e=>e.type==="instruction_completed"), true); assert.equal(events.some(e=>e.type==="draft_blocked"), false);
 });

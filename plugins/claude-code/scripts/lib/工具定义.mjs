@@ -35,10 +35,11 @@ const MANAGED_TOOLS = [
   {
     name: "delegate_orca", description: "管理 Orca 原生 Claude 会话。status 默认短状态，用 after_revision 去重；transcript/history 按正文游标分页，read 的 screen_revision 独立去重屏幕。取消返回请求状态，不能据此声称后台全部停止。通过 delegate_wake 可接入本地事件续接；仍不提供 Orca 自动合并和统一执行预算。",
     inputSchema: { type: "object", properties: {
-      action: { type: "string", enum: ["list", "create", "attach", "send", "status", "read", "wait", "release", "close", "takeover", "cancel", "transcript", "history", "diagnose", "repair_cursor", "human_activity", "rebind"] },
-      controller_id: { type: "string" }, cwd: { type: "string" }, id: { type: "string" },
+      action: { type: "string", enum: ["list", "create", "attach", "send", "status", "read", "wait", "release", "close", "takeover", "cancel", "transcript", "history", "diagnose", "repair_cursor", "human_activity", "rebind", "submit_draft", "confirm_submission"] },
+      controller_id: { type: "string" }, cwd: { type: "string" }, id: { type: "string", description: "桥接接入记录UUID，即create/attach/rebind返回的id；绝不能传Claude session_id或terminal_id。status/read/wait/send均用此id。" },
       session_id: { type: "string" }, terminal_id: { type: "string" }, idle_confirmed: { type: "boolean" },
       request_id: { type: "string" }, title: { type: "string" }, model: { type: "string" }, prompt: { type: "string" },
+      draft_hash: { type: "string" }, draft_confirmed: { type: "boolean" }, delivery_level: { type: "string", enum: ["subtask", "milestone", "batch", "review", "final"] },
       profile: { type: "string", enum: ["low", "medium", "high"] }, process_docs: { type: "boolean" }, include_text: { type: "boolean" }, stop_confirmed: { type: "boolean" },
       force: { type: "boolean" }, after_revision: { type: "string" }, screen_revision: { type: "string" }, max_chars: { type: "integer" },
       timeout_ms: { type: "integer", minimum: 1, maximum: 60000 }, cursor: { type: ["string", "object"] },
