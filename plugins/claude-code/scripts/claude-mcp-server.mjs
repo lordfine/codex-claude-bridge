@@ -18,6 +18,7 @@ import { orcaSessions } from "./lib/Orca会话.mjs";
 import { TOOLS } from "./lib/工具定义.mjs";
 import { coordinationControl } from "./lib/协作策略.mjs";
 import { readHistory } from "./lib/会话读取.mjs";
+import { overview, compactObservation } from "./lib/进度摘要.mjs";
 
 const SERVER_NAME = "claude-code";
 const SERVER_VERSION = JSON.parse(fs.readFileSync(new URL("../.codex-plugin/plugin.json", import.meta.url), "utf8")).version;
@@ -71,9 +72,9 @@ async function handleMessage(message) {
         delegate_wait: async (args) => managedResult(await waitManaged(args.task_id, args.cursor, args.seconds, args.controller_id)),
         delegate_send: async (args) => managedResult(await control(args.task_id, { type: "send", prompt: args.prompt }, args.controller_id)),
         delegate_takeover: async (args) => managedResult(await control(args.task_id, { type: "takeover", immediate: args.immediate }, args.controller_id)),
-        delegate_permissions: (args) => managedResult(args.decision_id
+        delegate_permissions: (args) => managedResult(args.decision_id && args.decision
           ? decidePermission(args.task_id, args.decision_id, args.decision, args.reason, args.controller_id)
-          : pendingPermissions(args.task_id, args.controller_id)),
+          : pendingPermissions(args.task_id, args.controller_id, args.decision_id)),
         delegate_open: (args) => managedResult(openVisibleWindow(args.task_id, args.controller_id)),
         delegate_limit: (args) => managedResult(setConcurrencyLimit(args.limit, args.controller_id)),
         delegate_cancel: async (args) => managedResult(await cancelManaged(args.task_id, args.controller_id)),
@@ -89,14 +90,16 @@ async function handleMessage(message) {
         delegate_wake: async (args) => managedResult(await wakeControl(args)),
         delegate_orca: async (args) => managedResult(await orcaSessions(args)),
         delegate_coordination: (args) => managedResult(coordinationControl(args)),
-        delegate_history: (args) => managedResult(readHistory(args))
+        delegate_history: (args) => managedResult(readHistory(args)),
+        delegate_overview: (args) => managedResult(overview(args))
       };
 
   const handler = Object.hasOwn(handlers, params?.name) && handlers[params.name];
   if (!handler) { replyError(id, -32602, "未知工具：" + params?.name); return; }
   active.add(id);
   try {
-    const result = await handler(params?.arguments ?? {});
+    const args = params?.arguments ?? {};
+    const result = await compactObservation(params.name, args, () => handler(args));
     if (!cancelled.has(id)) reply(id, result);
   } catch (error) {
     if (!cancelled.has(id)) reply(id, { content: [{ type: "text", text: JSON.stringify({ error: { code: error.code || "TOOL_ERROR", message: error?.message ?? String(error), ...error.details } }) }], isError: true });

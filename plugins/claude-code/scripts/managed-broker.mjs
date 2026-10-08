@@ -6,23 +6,19 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
 import pty from "node-pty";
-import { appendEvent, exitTaskState, readJson, readTask, taskDir, taskPath, writeRuntime, writeTask } from "./lib/managed-state.mjs";
+import { appendEvent, exitTaskState, readJson, readTask, taskDir, taskPath, writeRuntime, writeTask, writeJson } from "./lib/managed-state.mjs";
 import { removeHandbackCommand } from "./lib/managed-config.mjs";
 import { launchVisibleWindow } from "./lib/managed-window.mjs";
-import { scheduleNext } from "./lib/managed-service.mjs";
+import { scheduleNext, invalidatePendingPermissions } from "./lib/managed-service.mjs";
 import { activeTerminalInput, hasHumanIntervention } from "./lib/managed-input.mjs";
+import { executable, ipcEndpoints, trustConfirmationKey } from "./lib/平台适配.mjs";
+import { executionClock } from "./lib/执行计时.mjs";
 
 const id = process.argv[2];
 const task = id && readTask(id);
 if (!task) throw new Error("任务不存在");
 
-const pipePrefix = process.platform === "win32" ? "\\\\.\\pipe\\" : path.join(os.tmpdir(), "ccpc-");
-const pipeBase = `ccpc-${id.replaceAll("-", "")}`;
-const terminalPipe = process.platform === "win32" ? `${pipePrefix}${pipeBase}-terminal` : `${pipePrefix}${pipeBase}-terminal.sock`;
-const controlPipe = process.platform === "win32" ? `${pipePrefix}${pipeBase}-control` : `${pipePrefix}${pipeBase}-control.sock`;
-if (process.platform !== "win32") {
-  for (const file of [terminalPipe, controlPipe]) { try { fs.unlinkSync(file); } catch {} }
-}
+const endpoints = ipcEndpoints(id), terminalPipe = endpoints.terminal, controlPipe = endpoints.control;
 
 const env = { ...process.env, CC_PLUGIN_CODEX_TASK_ID: id,
   CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: String(task.subagentLimit || 8) };
@@ -32,7 +28,7 @@ const args = [task.resume ? "--resume" : "--session-id", task.sessionId,
   "--settings", task.settingsPath];
 if (task.model) args.push("--model", task.model);
 if (task.initialPrompt) args.push(task.initialPrompt);
-const claudeCommand = process.platform === "win32" ? "cmd.exe" : "claude";
+const claudeCommand = process.platform === "win32" ? "cmd.exe" : executable("claude");
 const claudeArgs = process.platform === "win32" ? ["/c", "claude.cmd", ...args] : args;
 const terminal = pty.spawn(claudeCommand, claudeArgs, {
   name: "xterm-256color", cols: 120, rows: 32, cwd: task.cwd, env
@@ -99,8 +95,10 @@ function newEvents() {
 let mainTurns = Number(task.turnsUsed) || 0;
 const startedAt = Date.now();
 const elapsedBaseMs = Number(task.elapsedMs) || 0;
-const limitMs = Math.max(0, (task.maxMinutes || 90) * 60_000 - elapsedBaseMs);
+const clock = executionClock(task, startedAt), permissionWaits = new Map();
+let lastActivity = null;
 const writeState = () => {
+  const timing = clock.update(exited || !ready || !busy || owner === "human" || permissionWaits.size > 0);
   const queueKey = JSON.stringify(queue);
   if (queueKey !== savedQueue) {
     writeTask({ ...readTask(id), queuedInstructions: queue });
@@ -112,7 +110,8 @@ const writeState = () => {
   humanQueued, humanDraft, humanInFlightCount: inFlightPrompts.filter((item) => item.kind === "human").length,
   backgroundTasks, activeSubagents: [...activeSubagents],
   current, queue, connected: Boolean(connected && !connected.destroyed),
-  exitCode, finalState, failure, elapsedBaseMs, elapsedMs: elapsedBaseMs + Date.now() - startedAt,
+  startupHints: !ready ? { trustQuestion: startupScreen.includes("Quick safety check"), trustYes: startupScreen.includes("Yes, I trust"), trustNo: startupScreen.includes("No, exit"), mcpQuestion: startupScreen.includes("New MCP server"), bypassNotice: /Bypass Permissions|bypass permissions/i.test(startupScreen), readyFooter: /bypass permissions on|plan mode on/i.test(startupScreen), titleEscape: /\x1b\][02];/.test(startupScreen), acceptancePrompt: /Yes, I accept|Do you want to proceed/i.test(startupScreen) } : null,
+  exitCode, finalState, failure, elapsedBaseMs, ...timing, lastActivity, permissionWaiting: permissionWaits.size,
   startedAt: new Date(startedAt).toISOString(), updatedAt: new Date().toISOString()
   });
 };
@@ -169,13 +168,14 @@ terminal.onData((data) => {
     }
   }
   if (task.worktree && !trustedOwnWorktree) {
-    if (startupScreen.includes("Quick safety check: Is this a project you created or one you trust?")) {
+    const confirmation = trustConfirmationKey(startupScreen);
+    if (confirmation) {
       trustedOwnWorktree = true;
-      terminal.write("\x1b[B\r");
-      appendEvent(id, { type: "own_worktree_trust_confirmed" });
+      setTimeout(() => { if (!exited) terminal.write(confirmation); }, 200);
+      appendEvent(id, { type: "own_worktree_trust_requested" });
     }
   }
-  if (!ready && !readyTimer && startupScreen.includes("\x1b]0;") && /bypass permissions on|plan mode on/i.test(startupScreen)) {
+  if (!ready && !readyTimer && /\x1b\][02];/.test(startupScreen) && /bypass permissions on|plan mode on/i.test(startupScreen)) {
     readyTimer = setTimeout(() => {
       if (exited) return;
       ready = true;
@@ -186,10 +186,15 @@ terminal.onData((data) => {
   if (connected && !connected.destroyed) connected.write(data);
 });
 terminal.onExit(({ exitCode: code }) => {
+  lastActivity = { commandId: current?.id || null, busy, backgroundCount: backgroundTasks.length, activeSubagentCount: activeSubagents.size };
   exited = true;
+  ready = false; busy = false; current = null; takeoverPending = false; takeoverImmediate = false;
+  inFlightPrompts.length = 0; activeSubagents.clear(); backgroundTasks = []; humanQueued = 0; humanDraft = false;
+  const timing = clock.update(true);
   exitCode = code;
   finalState = exitTaskState({ limitHit, cancelRequested, recoveryAttempts: task.recoveryAttempts }, code);
-  writeTask({ ...readTask(id), state: finalState, elapsedMs: elapsedBaseMs + Date.now() - startedAt });
+  writeTask({ ...readTask(id), state: finalState, elapsedMs: timing.elapsedMs, waitingMs: timing.waitingMs, timingMode: "execution" });
+  invalidatePendingPermissions(task);
   if (finalState === "paused") appendEvent(id, { type: "recovery_failed", exitCode: code });
   removeHandbackCommand(task, task.handbackCommand?.owned);
   appendEvent(id, { type: "process_exit", exitCode: code });
@@ -201,6 +206,8 @@ terminal.onExit(({ exitCode: code }) => {
   }
   catch (error) { appendEvent(id, { type: "queue_start_failed", error: error.message }); }
   if (connected && !connected.destroyed) connected.end();
+  terminalServer.close(); controlServer.close();
+  if (endpoints.directory) { for (const file of [terminalPipe, controlPipe]) { try { fs.unlinkSync(file); } catch {} } try { fs.rmdirSync(endpoints.directory); } catch {} }
   setTimeout(() => process.exit(code || 0), 1500).unref();
 });
 
@@ -350,6 +357,16 @@ setInterval(() => {
     if (answer.ok) { try { fs.unlinkSync(file); } catch {} }
   }
   for (const event of newEvents()) {
+    if (exited) break;
+    if (event.type === "permission_pending") permissionWaits.set(event.decisionId, { tool: event.tool, promptId: event.promptId, agentId: event.agentId });
+    if (["permission_decided", "permission_invalidated"].includes(event.type)) permissionWaits.delete(event.decisionId);
+    if (event.type === "PostToolUse") {
+      for (const [decisionId, p] of permissionWaits) if (p.tool === event.tool && p.agentId === event.agentId && (!p.promptId || p.promptId === event.promptId)) {
+        permissionWaits.delete(decisionId);
+        const file = path.join(taskDir(id), "pending", `${decisionId}.json`), record = readJson(file);
+        if (record?.state === "awaiting_human") writeJson(file, { ...record, state: "resolved_by_tool", resolvedAt: new Date().toISOString(), hookActive: false });
+      }
+    }
     if (event.type === "StopFailure" && !event.agentId) {
       failure = { error: event.error || "unknown", at: event.at };
       if (current) appendEvent(id, { type: "instruction_failed", commandId: current.id, error: failure.error });
@@ -434,6 +451,7 @@ setInterval(() => {
       writeState();
     }
     if (event.type === "handback") {
+      permissionWaits.clear();
       if (current?.prompt === "/交还") appendEvent(id, { type: "instruction_completed", commandId: current.id, handback: true });
       current = null; busy = false; failure = null;
       owner = "codex"; takeoverPending = false; takeoverImmediate = false; humanInputSeen = false;
@@ -444,12 +462,13 @@ setInterval(() => {
     }
     if (event.type === "config_changed") { owner = "human"; writeState(); }
   }
+  writeState();
 }, 250).unref();
 
-setTimeout(() => {
-  if (!exited) {
+if (task.maxMinutes > 0) setInterval(() => {
+  if (!exited && !limitHit && clock.snapshot().elapsedMs >= task.maxMinutes * 60000) {
     limitHit = true;
-    appendEvent(id, { type: "time_limit_reached", maxMinutes: task.maxMinutes || 90 });
+    appendEvent(id, { type: "time_limit_reached", maxMinutes: task.maxMinutes });
     terminal.kill();
   }
-}, limitMs).unref();
+}, 250).unref();

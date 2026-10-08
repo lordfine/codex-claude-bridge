@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { createOrcaAdapter, emptyPrompt, statusIdentity, readTurn } from "../plugins/claude-code/scripts/lib/Orca会话.mjs";
+process.env.PATH = path.resolve("tests/fixtures/bin") + path.delimiter + process.env.PATH;
 
 function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ccpc-orca-test-")), cwd = root;
@@ -99,15 +100,15 @@ test("释放保留原终端；关闭已有终端须明确确认", async () => {
   assert.equal(released.terminalKeptAlive, true); assert.equal(f.calls.filter((c) => c[1] === "close").length, 0);
 });
 
-test("新建可见原生终端，模型默认继承，重复创建只有一个实例", { skip: process.platform !== "win32" }, async () => {
+test("新建可见原生终端，模型默认继承，重复创建只有一个实例", async () => {
   const f = fixture(), args = { action: "create", cwd: f.cwd, controller_id: "主控一", request_id: "新建一" };
   const r = await f.api(args), duplicate = await f.api(args);
   assert.equal(f.state.launches, 1); assert.equal(r.createdByPlugin, true); assert.equal(r.model, null); assert.equal(duplicate.id, r.id);
   const command = f.calls.find((c) => c[1] === "create");
-  assert.ok(command.includes("pwsh.exe")); assert.ok(command.some((part) => part.includes(`claude --session-id '${r.sessionId}'`)));
+  assert.ok(command.includes(process.platform === "win32" ? "pwsh.exe" : "/bin/zsh")); assert.ok(command.some((part) => part.includes(`--session-id '${r.sessionId}'`)));
 });
 
-test("创建回执不明时重复请求只返回不明状态", { skip: process.platform !== "win32" }, async () => {
+test("创建回执不明时重复请求只返回不明状态", async () => {
   const f = fixture(); delete f.t.incarnationId;
   const args = { action: "create", cwd: f.cwd, controller_id: "主控一", request_id: "新建一" };
   await assert.rejects(f.api(args), /完整终端身份/);

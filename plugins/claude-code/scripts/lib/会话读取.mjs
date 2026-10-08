@@ -30,6 +30,17 @@ export function entryText(entry, tools = false) {
   }).join("\n");
 }
 
+export function messageOrigin(entry) {
+  const content = entry.message?.content;
+  if (Array.isArray(content) && content.some((p) => p.type === "tool_result")) return "tool_result";
+  if ((entry.attachment || entry.data)?.type === "task_notification") return "task_notification";
+  const text = normalizedText(entryText(entry));
+  // 兼容 Claude 的完整系统投递包装；普通聊天中引用标签不按通知处理。
+  if (/^Another Claude session sent a message:\s*<teammate-message\s+teammate_id="[^"<>\r\n]+"(?:\s+[^<>]*)?>[\s\S]*<\/teammate-message>\s*$/.test(text)) return "agent_notification";
+  if (entry.isMeta && /^<(?:teammate-message|task-notification)\b[\s\S]*<\/(?:teammate-message|task-notification)>\s*$/.test(text)) return "agent_notification";
+  return entry.type === "user" ? "human_input" : entry.type;
+}
+
 // 游标始终位于完整 JSONL 行边界。超长行会被明确标记，不把读到的片段当终态。
 export function scanSession(file, cursor = {}, { budget = 4 * 1024 * 1024, visit } = {}) {
   const stat = fs.statSync(file), generation = `${stat.dev}:${stat.ino}:${stat.birthtimeMs}`;
@@ -88,20 +99,23 @@ export function observeInstruction(sessionId, cwd, instruction, saved = {}) {
     }
     if (e.type === "user") {
       const content = e.message?.content;
-      const toolResult = Array.isArray(content) && content.some((part) => part.type === "tool_result");
-      if (!toolResult) {
+      const origin = messageOrigin(e);
+      if (["task_notification", "agent_notification"].includes(origin)) { result.notificationCount = (result.notificationCount || 0) + 1; return; }
+      if (origin !== "tool_result") {
         const text = normalizedText(entryText(e));
         if (!result.logged && (instruction.marker ? text.includes(instruction.marker) : text === normalizedText(instruction.prompt))) {
           result.logged = true; result.userUuid = e.uuid || null;
         } else if (result.logged && text) {
           if (!result.completed) result.ambiguous = true;
           result.nextUserObserved = true;
+          result.humanInputEvidence = { uuid: e.uuid || null, origin, at: e.timestamp || null };
           return { stopBefore: true };
         }
       }
     }
     if (result.logged && e.type === "assistant") {
       const text = entryText(e), hasTools = (e.message?.content || []).some?.((part) => part.type === "tool_use");
+      if (hasTools) result.completed = false;
       for (const part of Array.isArray(e.message?.content) ? e.message.content : []) {
         if (part.type === "tool_use" && part.input?.run_in_background === true && part.id) {
           result.background ||= {}; result.background[part.id] = { toolUseId: part.id, taskId: part.id };
@@ -130,6 +144,12 @@ export function observeInstruction(sessionId, cwd, instruction, saved = {}) {
   return result;
 }
 
+export function diagnoseCursor(sessionId, cwd, observation = {}) {
+  const file = findSession(sessionId, cwd); let boundary = null;
+  const scan = scanSession(file, observation.cursor || {}, { budget: 65536, visit: (e) => { boundary = { origin: messageOrigin(e), uuid: e.uuid || null, at: e.timestamp || null }; return { stop: true }; } });
+  return { boundary, changed: scan.changed, repairable: !scan.changed && ["agent_notification", "task_notification"].includes(boundary?.origin), ownershipChanged: false };
+}
+
 export function readHistory(args = {}) {
   const file = findSession(args.session_id, args.cwd), limit = Math.min(Math.max(Number(args.max_chars) || 2400, 1), 16000);
   const cursor = args.cursor || {}, messages = []; let used = 0, partial = null;
@@ -142,7 +162,7 @@ export function readHistory(args = {}) {
     const all = redactText(entryText(e, args.include_tools === true)); if (!all) return;
     const from = position.start === cursor.offset ? Number(cursor.character) || 0 : 0;
     const count = Math.min(all.length - from, limit - used); if (count <= 0) return { stopBefore: true };
-    messages.push({ uuid: e.uuid || null, role, at: e.timestamp || null, text: all.slice(from, from + count) }); used += count;
+    messages.push({ uuid: e.uuid || null, role, origin: messageOrigin(e), at: e.timestamp || null, text: all.slice(from, from + count) }); used += count;
     if (from + count < all.length) { partial = { offset: position.start, generation: position.generation, character: from + count }; return { stopBefore: true }; }
     if (used >= limit) return { stop: true };
   } });

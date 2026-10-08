@@ -50,6 +50,7 @@ try {
   const tools = await rpc("tools/list", {});
   const required = ["delegate_workflow", "delegate_wait_many", "delegate_models", "delegate_manage", "delegate_sessions", "delegate_wake", "delegate_orca"];
   if (Number(manifest.version.split(".")[1]) >= 18) required.push("delegate_coordination", "delegate_history");
+  if (Number(manifest.version.split(".")[1]) >= 19) required.push("delegate_overview");
   for (const name of required) {
     if (!tools.result.tools.some((tool) => tool.name === name)) throw new Error(`缺少工具 ${name}`);
   }

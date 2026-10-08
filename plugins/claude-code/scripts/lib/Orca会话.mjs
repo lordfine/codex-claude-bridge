@@ -5,8 +5,9 @@ import crypto from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { MANAGED_ROOT, controllerId, readJson, writeJson, resolveModel, listTasks, readRuntime } from "./managed-state.mjs";
-import { observeInstruction, readHistory } from "./会话读取.mjs";
+import { observeInstruction, readHistory, diagnoseCursor } from "./会话读取.mjs";
 import { effectiveProfile, validateProfile, prepareRecordDocuments, deliveryInstruction } from "./协作策略.mjs";
+import { orcaLaunch, executable as resolveExecutable } from "./平台适配.mjs";
 
 const execute = promisify(execFile);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -23,7 +24,7 @@ export async function orcaCall(args, cwd) {
     if (process.env.ORCA_CLI_COMMAND) executable = process.env.ORCA_CLI_COMMAND;
     else {
       const name = process.env.ORCA_DEV_REPO_ROOT ? "orca-dev" : process.platform === "linux" ? "orca-ide" : "orca";
-      if (process.platform !== "win32") executable = name;
+      if (process.platform !== "win32") executable = resolveExecutable(name);
       else {
         const result = await execute("powershell.exe", ["-NoProfile", "-Command",
           `[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); (Get-Command ${name} -ErrorAction Stop).Source`],
@@ -182,11 +183,10 @@ export function createOrcaAdapter({ call = orcaCall, root = path.join(MANAGED_RO
         }
         throw new Error("没有找到身份吻合且空闲的 Orca Claude 终端；未重启任何会话");
       }
-      if (process.platform !== "win32") throw new Error("Orca 新建启动命令当前仅适配 Windows PowerShell");
       const model = resolveModel(args.model), sessionId = crypto.randomUUID();
       // --command 由 PowerShell 执行，所有可变参数均使用单引号转义；不拼接任务正文。
-      const command = `claude --session-id ${quote(sessionId)}${model ? ` --model ${quote(model)}` : ""}`;
-      const response = await call(["terminal", "create", "--worktree", `path:${args.cwd}`, "--title", args.title || "Codex 委派 Claude", "--shell", "pwsh.exe", "--command", command], args.cwd);
+      const launch = orcaLaunch(sessionId, model);
+      const response = await call(["terminal", "create", "--worktree", `path:${args.cwd}`, "--title", args.title || "Codex 委派 Claude", "--shell", launch.shell, "--command", launch.command], args.cwd);
       const t = response.result.terminal;
       if (!t?.handle || !t.incarnationId || !response._meta?.runtimeId) throw new Error("Orca 未返回完整终端身份；新建回执不明，请先列出核对");
       const r = { id: crypto.randomUUID(), controllerId: master, sessionId, cwd: args.cwd, terminalId: t.handle,
@@ -200,6 +200,16 @@ export function createOrcaAdapter({ call = orcaCall, root = path.join(MANAGED_RO
     if (r.state !== "attached") throw new Error("接入已释放或关闭，须重新接入");
     if (args.action === "release") { r.controlRevision = (r.controlRevision || 0) + 1; r.state = "released"; writeJson(recordPath(r.id), r); return { ...summary(r), terminalKeptAlive: true }; }
     const t = await bound(r);
+    if (args.action === "diagnose") return { ...summary(r), diagnosis: diagnoseCursor(r.sessionId, r.cwd, r.observation), nextAction: "可按证据修复通知边界；真实人类接管仍需显式交还" };
+    if (args.action === "repair_cursor") {
+      if (args.idle_confirmed !== true) throw new Error("修复游标前须确认人类当前轮与队列已结束");
+      const diagnosis = diagnoseCursor(r.sessionId, r.cwd, r.observation);
+      if (!diagnosis.repairable) throw new Error("停留边界不是可识别通知，不能跳过人类输入或损坏记录");
+      r.controlRevision = (r.controlRevision || 0) + 1;
+      r.observation = { ...r.observation, nextUserObserved: false, ambiguous: false, humanInputEvidence: null, completed: false };
+      writeJson(recordPath(r.id), r);
+      return { ...updateTurn(r), cursorRepaired: true, ownerKept: true };
+    }
     if (args.action === "close") {
       if (!r.createdByPlugin && args.close_attached_confirmed !== true) throw new Error("关闭已有用户终端须明确确认；只交还控制权请用 release");
       await call(["terminal", "close", "--terminal", r.terminalId], r.cwd);
@@ -214,7 +224,7 @@ export function createOrcaAdapter({ call = orcaCall, root = path.join(MANAGED_RO
       r.controlRevision = (r.controlRevision || 0) + 1;
       if (r.cancelRequested && r.lastInstruction) { r.lastInstruction.state = "cancelled"; r.lastInstruction.terminalState = "cancelled"; }
       r.cancelRequested = false;
-      const file = transcriptFile(r.sessionId); if (r.observation && file) r.observation.cursor = { offset: fs.statSync(file).size };
+      const file = transcriptFile(r.sessionId); if (args.stop_confirmed === true && r.observation && file) r.observation.cursor = { offset: fs.statSync(file).size };
       if (r.observation) r.observation.nextUserObserved = false;
       if (args.stop_confirmed === true && r.observation) { r.observation.background = {}; r.observation.backgroundOutstanding = false; }
       writeJson(recordPath(r.id), r); return summary(r);
@@ -268,7 +278,7 @@ export function createOrcaAdapter({ call = orcaCall, root = path.join(MANAGED_RO
   return async (args = {}) => {
     const master = args.controller_id || controllerId();
     if (!master) throw new Error("请提供 Codex 主控任务 ID");
-    const mutate = ["create", "attach", "send", "release", "close", "takeover", "cancel"].includes(args.action);
+    const mutate = ["create", "attach", "send", "release", "close", "takeover", "cancel", "repair_cursor"].includes(args.action);
     if (!mutate) return operation(args, master);
     if (!args.request_id || typeof args.request_id !== "string" || args.request_id.length > 120) throw new Error("改变 Orca 会话须提供稳定 request_id");
     // 跨 MCP 进程串行修改，崩溃后的请求保持不明状态，不能凭空重复新建或发送。

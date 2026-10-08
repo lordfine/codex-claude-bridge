@@ -62,7 +62,7 @@ test("无效模型与上限在创建工作树前被拒绝", () => {
   const cwd = repository("无效参数仓库");
   const before = git(cwd, "worktree", "list", "--porcelain");
   assert.throws(() => service.createManagedTask({ cwd, controller_id: "无效参数主控", model: "不存在" }), /模型不在/);
-  assert.throws(() => service.createManagedTask({ cwd, controller_id: "无效参数主控", max_minutes: 0 }), /执行时间/);
+  assert.throws(() => service.createManagedTask({ cwd, controller_id: "无效参数主控", max_minutes: -1 }), /执行时间/);
   assert.equal(git(cwd, "worktree", "list", "--porcelain"), before);
   assert.equal(git(cwd, "branch", "--list", "codex/*"), "");
 });

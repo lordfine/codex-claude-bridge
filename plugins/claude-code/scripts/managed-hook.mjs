@@ -5,6 +5,7 @@ import crypto from "node:crypto";
 
 import { appendEvent, claudeSettingsPath, fingerprint, readJson, readTask, taskDir, writeJson } from "./lib/managed-state.mjs";
 import { classifyPermission } from "./lib/managed-permission.mjs";
+import { redactText } from "./lib/会话读取.mjs";
 
 const taskId = process.env.CC_PLUGIN_CODEX_TASK_ID;
 if (!taskId) process.exit(0);
@@ -82,6 +83,10 @@ const decisionId = crypto.randomUUID();
 const pendingFile = path.join(taskDir(taskId), "pending", `${decisionId}.json`);
 const answerFile = path.join(taskDir(taskId), "decisions", `${decisionId}.json`);
 const input = request.tool_input || {};
+const configuredWait = Number(process.env.CC_PLUGIN_CODEX_PERMISSION_WAIT_MS);
+const waitMs = Number.isFinite(configuredWait) && configuredWait > 0
+  ? Math.min(900000, Math.max(100, configuredWait)) : (task.permissionWaitSeconds || 300) * 1000;
+const deadline = Date.now() + waitMs;
 writeJson(pendingFile, {
   id: decisionId,
   taskId,
@@ -90,22 +95,21 @@ writeJson(pendingFile, {
   tool: request.tool_name,
   promptId: request.prompt_id || null,
   agentId: request.agent_id || null,
-  command: typeof input.command === "string" ? input.command.slice(0, 4000) : null,
+  command: typeof input.command === "string" ? redactText(input.command).slice(0, 4000) : null,
   path: input.file_path || input.path || null,
-  createdAt: new Date().toISOString()
+  createdAt: new Date().toISOString(), state: "awaiting_codex", owner: "codex", hookPid: process.pid,
+  hookActive: true, deadlineAt: new Date(deadline).toISOString()
 });
 appendEvent(taskId, { ...base, type: "permission_pending", decisionId, kind: classification.kind });
 
-const configuredWait = Number(process.env.CC_PLUGIN_CODEX_PERMISSION_WAIT_MS);
-const waitMs = Number.isFinite(configuredWait) && configuredWait > 0
-  ? Math.min(30000, Math.max(100, configuredWait)) : 30000;
-const deadline = Date.now() + waitMs;
 while (Date.now() < deadline) {
+  const pending = readJson(pendingFile);
+  if (!pending || !["awaiting_codex", undefined].includes(pending.state)) process.exit(0);
   const answer = readJson(answerFile);
   if (answer && answer.id === decisionId && ["allow", "deny"].includes(answer.decision)) {
     try { fs.unlinkSync(answerFile); } catch { /* 决定已经读取。 */ }
     if (classification.kind === "user" && answer.decision === "allow") break;
-    try { fs.unlinkSync(pendingFile); } catch { /* 状态文件可能已经清理。 */ }
+    writeJson(pendingFile, { ...pending, state: "decided", owner: "codex", hookActive: false, decision: answer.decision, resolvedAt: new Date().toISOString() });
     appendEvent(taskId, { type: "permission_decided", decisionId, decision: answer.decision, actor: "codex" });
     process.stdout.write(JSON.stringify({
       hookSpecificOutput: {
@@ -123,4 +127,5 @@ while (Date.now() < deadline) {
 
 // 没有决定时让 Claude Code 保持原生人工权限提示，不主动批准。
 appendEvent(taskId, { type: "permission_to_human", decisionId });
-try { fs.unlinkSync(pendingFile); } catch { /* 状态文件可能已经清理。 */ }
+const pending = readJson(pendingFile);
+if (pending?.state === "awaiting_codex") writeJson(pendingFile, { ...pending, state: "awaiting_human", owner: "human", hookActive: false, escalatedAt: new Date().toISOString() });

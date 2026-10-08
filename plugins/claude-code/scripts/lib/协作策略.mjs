@@ -11,6 +11,7 @@ const URGENT = new Set(["instruction_failed", "StopFailure", "needs_input", "per
   "recovery_uncertain", "recovery_failed", "recovery_exhausted", "session_start_blocked", "broker_lost_claude_alive", "config_changed",
   "time_limit_reached", "turn_limit_reached", "process_exit", "cancel_uncertain", "direction_changed"]);
 const hash = (value) => crypto.createHash("sha256").update(String(value)).digest("hex");
+export const isUrgentEvent = (event) => URGENT.has(event.type);
 const configFile = (master) => path.join(MANAGED_ROOT, "coordination", `${hash(master)}.json`);
 export function validateProfile(value) {
   if (!Object.hasOwn(PROFILES, value)) throw new Error("协作档位须为 low、medium 或 high"); return value;

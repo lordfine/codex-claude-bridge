@@ -3,9 +3,10 @@ import { spawnSync } from "node:child_process";
 
 import { configuredModels } from "./managed-state.mjs";
 import { ensurePtyRuntime } from "./managed-runtime.mjs";
+import { executable } from "./平台适配.mjs";
 
 function claudeCommand(args, options = {}) {
-  const command = process.platform === "win32" ? "cmd.exe" : "claude";
+  let command; try { command = process.platform === "win32" ? "cmd.exe" : executable("claude"); } catch (error) { return { ok: false, output: "", error: error.message }; }
   const commandArgs = process.platform === "win32" ? ["/d", "/s", "/c", "claude.cmd", ...args] : args;
   const result = spawnSync(command, commandArgs, {
     cwd: os.tmpdir(), encoding: "utf8", windowsHide: true, timeout: 30_000,
@@ -32,6 +33,8 @@ export function checkManagedReadiness({ deep = false } = {}) {
   return {
     ready: claude.ok && terminal.ready && (!deep || login.verified),
     platform: process.platform,
+    architecture: process.arch,
+    visibleTerminal: { supported: ["win32", "darwin"].includes(process.platform), provider: process.platform === "darwin" ? "macOS Terminal" : process.platform === "win32" ? "Windows Terminal" : "手动连接", verified: false },
     node: process.version,
     claude: { available: claude.ok, version: claude.output.split(/\r?\n/)[0] || null,
       error: claude.ok ? null : claude.error || "无法执行 claude --version" },

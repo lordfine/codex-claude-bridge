@@ -7,6 +7,8 @@ import { MANAGED_ROOT, controllerId, readTask } from "./managed-state.mjs";
 import { wakeDir, readWakeJson, writeWakeJson, pendingWakeEvents, codexActivity, acknowledgeWakeEvents, codexTokenTotals, codexRecordedEffort, enqueueWakeEvent } from "./事件队列.mjs";
 import { spawnCodex, stopOwnedCodex, runCodex } from "./Codex调用.mjs";
 import { coordinationConfig, coordinationControl, eventEffort } from "./协作策略.mjs";
+import { redactText } from "./会话读取.mjs";
+import { attentionNotice } from "./本地提醒.mjs";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const WORKER = fileURLToPath(new URL("../事件续接进程.mjs", import.meta.url));
@@ -62,7 +64,8 @@ export function wakeStatus(controller) {
     cwd: config?.cwd || null, pending: pendingWakeEvents(folder).length,
     workerAlive: wakeAlive(readWakeJson(path.join(folder, "runner.lock", "owner.json"))?.pid),
     paused: Boolean(runtime.paused), reason: runtime.reason || null, activeRunId: runtime.activeRunId || null,
-    lastRun: runtime.lastRun || null, activity: config ? codexActivity(config.rolloutPath).state : "unconfigured" };
+    lastRun: runtime.lastRun || null, attention: runtime.paused ? readWakeJson(path.join(folder, "attention.json")) : null,
+    activity: config ? codexActivity(config.rolloutPath).state : "unconfigured" };
 }
 
 export async function wakeControl(args = {}) {
@@ -70,6 +73,12 @@ export async function wakeControl(args = {}) {
   if (!controller) throw new Error("请提供当前 Codex 主控任务 ID");
   const folder = wakeDir(MANAGED_ROOT, controller), file = path.join(folder, "config.json");
   let config = readWakeJson(file);
+  if (args.action === "inspect") {
+    if (!UUID.test(args.run_id || "")) throw new Error("须提供精确续接运行 ID");
+    const run = readWakeJson(path.join(folder, "runs", `${args.run_id}.json`));
+    if (!run) throw new Error("当前主控没有该续接运行");
+    return { ...wakeStatus(controller), run };
+  }
   if (args.action === "configure") {
     if (!args.cwd || !path.isAbsolute(args.cwd) || !fs.existsSync(args.cwd)) throw new Error("需要存在的绝对工作目录");
     const target = String(args.target_thread_id || controller).toLowerCase();
@@ -202,14 +211,18 @@ export async function dispatchWakeBatch(config, folder, events, options = {}) {
       }
     });
     let response; try { response = JSON.parse(result.message); } catch {}
+    run.diagnostic = { ...(result.diagnostic || {}), exitCode: result.code, signal: result.signal || null,
+      targetThreadMatched: result.threadId === config.targetThreadId, jsonParsed: Boolean(response),
+      schemaValid: ["handled", "needs_user"].includes(response?.status) && typeof response.summary === "string", externalInterrupted: interrupted };
+    run.diagnostic.category = interrupted ? "EXTERNAL_INTERRUPTION" : result.diagnostic?.timedOut ? "CLI_TIMEOUT" : result.code !== 0 ? "CLI_EXIT" : result.failed ? "PROTOCOL_FAILURE" : !run.diagnostic.targetThreadMatched ? "THREAD_MISMATCH" : !response ? "RESULT_PARSE" : !run.diagnostic.schemaValid ? "RESULT_SCHEMA" : "OK";
     const valid = !interrupted && result.code === 0 && !result.failed && result.threadId === config.targetThreadId &&
       ["handled", "needs_user"].includes(response?.status) && typeof response.summary === "string";
     run.state = valid ? response.status : "uncertain";
-    run.summary = valid ? response.summary.slice(0, 1000) : "CLI 回执或执行结果不明，需核对后处理";
+    run.summary = valid ? redactText(response.summary).slice(0, 1000) : `CLI 回执或执行结果不明（${run.diagnostic.category}），需核对后处理`;
     run.usage = result.usage; run.actualEffort = valid ? codexRecordedEffort(config.rolloutPath) : null;
     run.completedAt = new Date().toISOString(); writeWakeJson(runFile, run);
     const usageAfter = codexTokenTotals(config.rolloutPath);
-    if (!interrupted && usageBefore && usageAfter) {
+    if (valid && result.usage && !interrupted && usageBefore && usageAfter) {
       const delta = Object.fromEntries(["input_tokens", "cached_input_tokens", "output_tokens"].map((key) => [key, Number(usageAfter[key]) - Number(usageBefore[key])]));
       if (Object.values(delta).every((value) => Number.isFinite(value) && value >= 0)) run.usageDelta = { ...delta,
         uncached_input_tokens: Math.max(0, delta.input_tokens - delta.cached_input_tokens) };
@@ -221,10 +234,14 @@ export async function dispatchWakeBatch(config, folder, events, options = {}) {
     writeWakeJson(runtimeFile, { activeRunId: run.state === "handled" ? null : runId,
       paused: run.state !== "handled", reason: run.state === "handled" ? null : run.summary,
       lastRun: { id: runId, state: run.state, summary: run.summary, usage: run.usage, usageDelta: run.usageDelta || null, completedAt: run.completedAt } });
+    if (run.state !== "handled" && options.notify !== false) attentionNotice(folder, run);
     return run;
-  } catch {
-    run.state = "uncertain"; run.summary = "Codex 调用异常，停止自动重试"; writeWakeJson(runFile, run);
-    writeWakeJson(runtimeFile, { activeRunId: runId, paused: true, reason: run.summary }); return run;
+  } catch (error) {
+    run.state = "uncertain"; run.summary = "Codex 调用异常，停止自动重试";
+    run.diagnostic = { category: "INVOCATION_ERROR", code: /^[A-Z0-9_]+$/.test(error.code || "") ? error.code : null, started: Boolean(cli?.pid) }; run.completedAt = new Date().toISOString(); writeWakeJson(runFile, run);
+    writeWakeJson(runtimeFile, { activeRunId: runId, paused: true, reason: run.summary });
+    if (options.notify !== false) attentionNotice(folder, run);
+    return run;
   } finally { clearInterval(guard); stopOwnedCodex(cli); }
 }
 

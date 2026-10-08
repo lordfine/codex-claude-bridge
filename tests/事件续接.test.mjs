@@ -10,6 +10,7 @@ import { startServer, initialized, text } from "./helpers.mjs";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "ccpc-wake-test-"));
 process.env.CC_PLUGIN_CODEX_MANAGED_DIR = path.join(root, "状态");
+process.env.CC_PLUGIN_CODEX_DISABLE_NOTIFICATIONS = "1";
 const state = await import("../plugins/claude-code/scripts/lib/managed-state.mjs");
 const queue = await import("../plugins/claude-code/scripts/lib/事件队列.mjs");
 const wake = await import("../plugins/claude-code/scripts/lib/事件续接.mjs");
@@ -99,6 +100,15 @@ test("错误身份、无结构结果及求助保留队列并暂停", async () =>
     assert.equal(queue.pendingWakeEvents(f.folder).length, 1);
     assert.equal(queue.readWakeJson(path.join(f.folder, "runtime.json")).paused, true);
   }
+});
+
+test("续接解析失败有分类、持久提醒和可读运行诊断", async () => {
+  const f = fixture(); state.appendEvent(f.id, { type: "instruction_failed" });
+  const run = await wake.dispatchWakeBatch(f.config, f.folder, queue.pendingWakeEvents(f.folder), { runCodex: async () => ({ code: 0, threadId: f.config.targetThreadId, message: "无结构回执" }) });
+  assert.equal(run.diagnostic.category, "RESULT_PARSE"); assert.equal(run.usageDelta, undefined);
+  assert.equal(queue.readWakeJson(path.join(f.folder, "attention.json")).runId, run.id);
+  const inspected = await wake.wakeControl({ action: "inspect", controller_id: f.controller, run_id: run.id });
+  assert.equal(inspected.run.id, run.id); assert.equal(inspected.run.events.length, 1);
 });
 test("外部新轮次到来不确认后台结果，保留事件核对", async () => {
   const f = fixture(); state.appendEvent(f.id, { type: "instruction_completed" });

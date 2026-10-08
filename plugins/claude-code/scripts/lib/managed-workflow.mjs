@@ -67,6 +67,13 @@ function recoverLinks(value) {
     if (confirmed) { operation.state = "done"; operation.error = null; }
   }
   if (value.items.length && value.items.every((item) => item.stage === "delivered")) value.stage = "delivered";
+  for (const item of value.items) {
+    const review = item.reviewIds?.length && readTask(item.reviewIds.at(-1));
+    if (item.stage === "reviewing" && review && ["cancelled", "timed_out", "failed", "paused"].includes(review.state)) {
+      item.stage = "review_blocked"; item.reviewFailure = review.state;
+    }
+  }
+  if (!["paused", "cancelled", "delivered"].includes(value.stage) && value.items.some((i) => i.stage === "review_blocked")) value.stage = "needs_attention";
 }
 function brief(value, detail = false) {
   recoverLinks(value);
@@ -78,11 +85,13 @@ function brief(value, detail = false) {
     items: value.items.map((item) => {
       const task = item.taskId && readTask(item.taskId), runtime = item.taskId && readRuntime(item.taskId);
       const reviewId = item.reviewIds.at(-1) || null;
+      const review = reviewId && readTask(reviewId);
       const reviewRuntime = reviewId && readRuntime(reviewId);
       const state = task ? taskSummary(task).state : null;
       let nextAction = item.stage === "planned" ? "派发实现" : "等待关键事件";
       if (item.stage === "implementing" && state === "idle") nextAction = "读取交付正文并决定审查";
       if (item.stage === "reviewing" && reviewRuntime?.status === "idle") nextAction = "读取审查结论，决定返工或验收";
+      if (item.stage === "review_blocked") nextAction = "审查已中断，核对原因后显式重新审查";
       if (item.stage === "codex_work") nextAction = "Codex 接手修改，然后重新审查";
       if (item.stage === "revision_pending") nextAction = "核对返工指令的发送回执";
       if (item.stage === "conflict") nextAction = "解决合并冲突并提交，再调用 accept 确认交付";
@@ -92,7 +101,7 @@ function brief(value, detail = false) {
       const cleanupPending = item.stage === "delivered" && reviewId && !readTask(reviewId)?.worktreeRemoved && !readTask(reviewId)?.workspaceRetainedForReuse;
       if (item.stage === "delivered") nextAction = cleanupPending ? "已交付，审查目录待清理" : "已交付";
       return { id: item.id, label: item.label, stage: item.stage, taskId: item.taskId || null,
-        reviewId, repairs: item.repairs, state, nextAction, supersededBy: task?.supersededBy || null, cursors: item.cursors || {},
+        reviewId, reviewState: review?.state || null, repairs: item.repairs, state, nextAction, supersededBy: task?.supersededBy || null, cursors: item.cursors || {},
         summary: item.summary || null, cleanupPending: Boolean(cleanupPending), error: item.error || null };
     }),
     ...(detail ? { history: value.history, operations: value.operations } : {}),
@@ -209,14 +218,14 @@ export async function managedWorkflow(args = {}) {
           const task = createManagedTask({ cwd: fresh.cwd, prompt, model: item.model,
             profile: args.profile, process_docs: args.process_docs,
             workflow_id: fresh.id, workflow_item_id: item.id, workflow_operation_id: key, controller_id: controller,
-            visible: args.visible, max_minutes: args.max_minutes, max_turns: args.max_turns,
+            visible: args.visible, max_minutes: args.max_minutes, permission_wait_seconds: args.permission_wait_seconds, max_turns: args.max_turns,
             subagent_limit: args.subagent_limit });
           item.taskId = task.id; item.stage = "implementing";
           note(fresh, "implementation_dispatched", item.id); save(fresh);
         }
       } else if (action === "review") {
         const item = itemOf(fresh, args.item_id);
-        if (!item.taskId || !["implementing", "codex_work"].includes(item.stage)) throw new Error("当前条目不在可审查阶段");
+        if (!item.taskId || !["implementing", "codex_work", "review_blocked"].includes(item.stage)) throw new Error("当前条目不在可审查阶段");
         const capacity = listManagedTasks(controller);
         const runtime = readRuntime(item.taskId);
         const needsSlot = capacity.running >= capacity.limit && runtime?.status !== "exited";
