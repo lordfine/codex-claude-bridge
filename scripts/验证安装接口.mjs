@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const plugin = path.resolve(process.argv[2] || "plugins/claude-code");
 const manifest = JSON.parse(fs.readFileSync(path.join(plugin, ".codex-plugin", "plugin.json"), "utf8"));
@@ -72,6 +72,18 @@ try {
   if (required.includes("delegate_wake")) {
     const wake = await call("delegate_wake", { action: "status" });
     if (wake.enabled !== false || wake.pending !== 0) throw new Error("未配置的自动续接状态异常");
+  }
+  if (manifest.version === "0.19.2") {
+    for (const [name, action] of [["delegate_wake", "resolve_fault"], ["delegate_orca", "rebind"]]) {
+      if (!tools.result.tools.find((t) => t.name === name)?.inputSchema.properties.action.enum.includes(action)) throw new Error(`缺少恢复入口 ${name}/${action}`);
+    }
+    const queue = await import(pathToFileURL(path.join(plugin, "scripts", "lib", "事件队列.mjs")));
+    const diagnosis = await import(pathToFileURL(path.join(plugin, "scripts", "lib", "续接诊断.mjs")));
+    const folder = queue.wakeDir(state, "安装接口验证");
+    queue.writeWakeJson(path.join(folder, "config.json"), { enabled: false, controllerId: "安装接口验证" });
+    const fault = diagnosis.recordSchedulerFault(folder, new Error("安装夹具故障"), { stage: "installation_fixture" }, { fatal: true });
+    const recovered = await call("delegate_wake", { action: "resolve_fault", controller_id: "安装接口验证", fault_id: fault.id, resolution: "安装夹具已核对，无模型运行", decision: "retry" });
+    if (recovered.paused !== false || recovered.enabled !== false || recovered.modelCalls !== 0) throw new Error("独立故障恢复接口异常");
   }
   process.stdout.write(JSON.stringify({ 版本: manifest.version, 工具数: tools.result.tools.length,
     接口检查: "工作流、会话管理、事件续接及 Orca 会话", 准备检查: setup.ready, 状态恢复: true, 模型调用: 0 }) + "\n");

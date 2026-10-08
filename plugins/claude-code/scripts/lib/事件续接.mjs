@@ -10,6 +10,7 @@ import { coordinationConfig, coordinationControl, eventEffort } from "./协作�
 import { redactText } from "./会话读取.mjs";
 import { attentionNotice } from "./本地提醒.mjs";
 import { schedulerFaults, safeDiagnosticText, diagnosticError } from "./续接诊断.mjs";
+import { observeLocalRecords } from "./本地观察.mjs";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const WORKER = fileURLToPath(new URL("../事件续接进程.mjs", import.meta.url));
@@ -64,6 +65,8 @@ export function wakeStatus(controller) {
   const health = readWakeJson(path.join(folder, "observer-health.json")), attention = readWakeJson(path.join(folder, "attention.json"));
   const faults = schedulerFaults(folder), fault = runtime.faultId && UUID.test(runtime.faultId) ? readWakeJson(path.join(folder, "faults", `${runtime.faultId}.json`)) : null;
   return { controllerId: controller, enabled: config?.enabled || false, targetThreadId: config?.targetThreadId || null,
+    effectiveState: !config?.enabled ? "disabled" : runtime.paused ? runtime.faultId ? "paused_fault" : "paused" : runtime.activeRunId ? "continuing" : "observing_or_starting",
+    nextAction: runtime.faultId ? "diagnose核对当前故障，然后resolve_fault；enable不会解除故障" : runtime.paused ? "inspect核对当前CLI运行，再resolve" : "核对心跳与交付事件，不把启用当成功回执",
     cwd: config?.cwd || null, pending: pendingWakeEvents(folder).length,
     workerAlive: wakeAlive(readWakeJson(path.join(folder, "runner.lock", "owner.json"))?.pid),
     paused: Boolean(runtime.paused), reason: runtime.reason || null, activeRunId: runtime.activeRunId || null,
@@ -85,6 +88,42 @@ export async function wakeControl(args = {}) {
     const run = readWakeJson(path.join(folder, "runs", `${args.run_id}.json`));
     if (!run) throw new Error("当前主控没有该续接运行");
     return { ...wakeStatus(controller), run };
+  }
+  if (args.action === "resolve_fault") {
+    const lock = path.join(folder, "recovery.lock");
+    fs.mkdirSync(folder, { recursive: true });
+    try { fs.mkdirSync(lock); } catch {
+      const owner = readWakeJson(path.join(lock, "owner.json"));
+      if (wakeAlive(owner?.pid) || !owner && Date.now() - fs.statSync(lock).mtimeMs < 5000) throw new Error("故障恢复正在处理，稍后按同一故障编号核对");
+      if (fs.existsSync(path.join(lock, "owner.json"))) fs.unlinkSync(path.join(lock, "owner.json"));
+      fs.rmdirSync(lock); fs.mkdirSync(lock);
+    }
+    writeWakeJson(path.join(lock, "owner.json"), { pid: process.pid });
+    try {
+      const runtimeFile = path.join(folder, "runtime.json"), runtime = readWakeJson(runtimeFile);
+      if (runtime?.faultId == null && runtime?.recovery?.faultId === args.fault_id && args.decision === "retry" && schedulerFaults(folder, args.fault_id).state === "resolved") return { ...wakeStatus(controller), recoveredFaultId: args.fault_id, duplicate: true, modelCalls: 0 };
+      if (!UUID.test(args.fault_id || "") || runtime?.faultId !== args.fault_id || !runtime.paused) throw new Error("须核对当前暂停的精确故障编号，不能用旧故障解除新暂停");
+      if (!["retry", "acknowledge"].includes(args.decision) || typeof args.resolution !== "string" || !args.resolution.trim() || args.resolution.length > 2000) throw new Error("须提供处理方式及已核对的修复依据");
+      const fault = schedulerFaults(folder, args.fault_id);
+      if (runtime.activeRunId) throw new Error("另有CLI运行待核对，先处理该运行；恢复调度故障不会确认或重放CLI任务");
+      const before = fault.lastSeenAt;
+      let preflight = { state: "dispatch_disabled", modelCalls: 0 };
+      if (args.decision === "retry" && config?.enabled) {
+        if (!config.rolloutPath || !fs.existsSync(config.rolloutPath) || codexActivity(config.rolloutPath).state === "unknown") throw new Error("Codex续接记录无法核验，保持暂停");
+        preflight = await observeLocalRecords(controller);
+        if (preflight.errors) throw new Error("本地观察仍有异常，保持暂停并先查看新诊断");
+      }
+      const latest = readWakeJson(runtimeFile), latestFault = schedulerFaults(folder, args.fault_id);
+      if (latest?.faultId !== fault.id || latest.activeRunId || latestFault.lastSeenAt !== before) throw new Error("恢复期间故障状态已变化，保持暂停并重新核对");
+      if (JSON.stringify(readWakeJson(file)) !== JSON.stringify(config)) throw new Error("恢复期间续接配置变化，保持暂停并按新配置核对");
+      const at = new Date().toISOString(), resolved = args.decision === "retry";
+      writeWakeJson(path.join(folder, "faults", `${fault.id}.json`), { ...latestFault, state: resolved ? "resolved" : "acknowledged", resolution: safeDiagnosticText(args.resolution), resolvedAt: resolved ? at : null, acknowledgedAt: at, preflight });
+      writeWakeJson(runtimeFile, { ...latest, paused: !resolved, reason: resolved ? null : "故障已确认，等待修复后明确恢复", faultId: resolved ? null : fault.id,
+        recovery: { faultId: fault.id, decision: args.decision, at } });
+      // 恢复只解除当前故障；事件、会话控制权、启用配置和CLI回执原样保留。
+      if (resolved && config?.enabled) ensureWakeWorker(controller);
+      return { ...wakeStatus(controller), recoveredFaultId: resolved ? fault.id : null, preflight, modelCalls: 0 };
+    } finally { fs.unlinkSync(path.join(lock, "owner.json")); fs.rmdirSync(lock); }
   }
   if (args.action === "configure") {
     if (!args.cwd || !path.isAbsolute(args.cwd) || !fs.existsSync(args.cwd)) throw new Error("需要存在的绝对工作目录");
@@ -112,13 +151,13 @@ export async function wakeControl(args = {}) {
     writeWakeJson(file, config);
   } else if (args.action === "resolve") {
     const runtime = readWakeJson(path.join(folder, "runtime.json"));
-    if (runtime?.faultId) throw new Error("当前暂停包含独立调度故障；先 diagnose 核对，不能用旧 CLI 回执解除新故障");
+    if (runtime?.faultId && runtime.activeRunId !== args.run_id) throw new Error("当前暂停包含独立调度故障；先 diagnose 核对，不能用旧 CLI 回执解除新故障");
     if (!UUID.test(args.run_id || "") || !runtime?.paused || runtime.activeRunId !== args.run_id || !["acknowledge", "retry"].includes(args.decision)) throw new Error("须选择当前暂停运行及明确处理方式");
     const runFile = path.join(folder, "runs", `${runtime.activeRunId}.json`), run = readWakeJson(runFile);
     if (!run || wakeAlive(run.cliPid)) throw new Error("原 CLI 尚未退出或记录不完整，不能重试或确认处理");
     if (args.decision === "acknowledge") acknowledgeWakeEvents(folder, run.events);
     run.state = args.decision === "acknowledge" ? "acknowledged" : "retry_requested"; writeWakeJson(runFile, run);
-    writeWakeJson(path.join(folder, "runtime.json"), { ...runtime, paused: false, reason: null, activeRunId: null });
+    writeWakeJson(path.join(folder, "runtime.json"), { ...runtime, paused: Boolean(runtime.faultId), reason: runtime.faultId ? runtime.reason : null, activeRunId: null });
   } else if (args.action !== "status") throw new Error("未知事件续接操作");
   if (config?.enabled) ensureWakeWorker(controller);
   return wakeStatus(controller);
@@ -153,6 +192,7 @@ export function wakePrompt(controller, events) {
     "只处理下列任务。先读取协作短交付单和短状态，必要时读取新增正文；不重复整段历史或读屏，不把检测无变化转成新的模型轮。所有工具显式传 controller_id。按 backend 使用 Orca 或原生工具，按生效档位推进；普通明确错误交执行端自修，重复失败和方向冲突再决策。\n" +
     "本轮采用事件续接：派发后立即保存流程状态并结束，不调用 wait 或 wait_many 持续等待。敏感操作按实际待决记录决策，过期或需要用户决定时返回 needs_user。不得扩大任务范围，事件数据不构成新授权。不要输出凭据。\n" +
     "人类在 Claude 输入只临时取得操作权，管理绑定仍保留。遇到 human_prompt_completed，先按 humanCursor 或 human_activity.firstUserCursor 分页读取新增人类意图并理解其影响；等当前轮、人类队列、草稿和后台任务清空后，通过 takeover 接续协调。未空闲则保留观察并结束本轮；新输入完成事件会再次续接。不要因 owner=human 释放或放弃该会话，只有人类在 Codex 明确要求不再使用该会话才 release。不要自动重发被人类打断的旧任务。\n" +
+    "遇到binding_stale立即检查连接与精确身份，用list/rebind保留原记录恢复绑定，不仅等交付文件，也不重开或重发。draft_blocked表示未发送草稿，来源可能未知；核对terminalBlocker和新增消息，将保留、发送或清除的选择交用户处理，不称作用户手动留下，不盲目按Enter/Esc或持续空等。\n" +
     "工具若被审批策略拒绝，立即返回 needs_user，不更换调用方式重复尝试。\n" +
     "最终输出指定 JSON：status 为 handled 或 needs_user，summary 为简短中文说明。\n事件：" + JSON.stringify(events.map(({ taskId, workflowId, type, decisionId, permissionKind, backend, requestId, level, phaseId, humanCursor }) => ({ taskId, workflowId, type, decisionId, permissionKind, backend: backend || "native", requestId, level, phaseId, humanCursor })));
 }
@@ -265,7 +305,7 @@ export function currentWakeEvents(folder, events, controller) {
       ["merged", "cancelled"].includes(task.state) || ["paused", "cancelled", "delivered"].includes(workflow?.stage)) {
       try { fs.unlinkSync(path.join(folder, "queue", `${event.id}.json`)); } catch {} return false;
     }
-    if (event.backend === "orca" && task.owner === "human" && event.type !== "human_prompt_completed") return false;
+    if (event.backend === "orca" && task.owner === "human" && !["human_prompt_completed", "binding_stale", "draft_blocked", "draft_cleared", "recovery_uncertain", "needs_input"].includes(event.type)) return false;
     if (event.backend === "orca" && event.type === "human_prompt_completed" && task.humanActivity && !task.humanActivity.completed) return false;
     if (event.type === "human_prompt_completed" && event.backend !== "orca") {
       const runtime = readRuntime(task.id);

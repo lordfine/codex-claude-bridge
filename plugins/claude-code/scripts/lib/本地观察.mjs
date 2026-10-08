@@ -32,28 +32,38 @@ export async function observeLocalRecords(controller, { root = MANAGED_ROOT, obs
     };
     let completed = false;
     if (next.controlRevision !== r.controlRevision) { next.observation = r.observation || {}; next.humanActivity = r.humanActivity || null; next.controlRevision = r.controlRevision; }
+    if (backend === "orca" && now - (next.lastProbeAt || 0) >= 5000) {
+      try { next.probe = await probe(r); }
+      catch (error) { next.probe = { error: error.code || "PROBE_FAILED" }; }
+      next.lastProbeAt = now;
+      if (next.probe.stale) emit("binding_stale", `${r.runtimeId}:${r.terminalId}:${next.probe.code || "stale"}`);
+      if (next.probe.error) emit("recovery_uncertain", `${r.runtimeId}:${r.terminalId}:${next.probe.error}`);
+      if (next.probe.needsInput) emit("needs_input", `${r.lastInstruction?.requestId}:${next.probe.revision}`);
+      if (next.probe.draft) emit("draft_blocked", `${r.terminalId}:${next.probe.draftEvidence?.fingerprint || next.probe.revision || "unknown"}`);
+      if (previous.probe?.draft && !next.probe.draft && !next.probe.stale && !next.probe.error) emit("draft_cleared", `${r.terminalId}:${previous.probe.draftEvidence?.fingerprint || "unknown"}`);
+      const recordFile = path.join(root, "orca", "会话", `${r.id}.json`), fresh = readJson(recordFile);
+      if (fresh?.state === "attached" && fresh.controlRevision === r.controlRevision) {
+        fresh.terminalBlocker = next.probe.stale ? { kind: "binding_stale", code: next.probe.code || "BINDING_STALE" } : next.probe.error ? { kind: "probe_error", code: next.probe.error } : next.probe.draft ? { kind: "draft", ...(next.probe.draftEvidence || { present: true, source: "unknown" }) } : null;
+        writeJson(recordFile, fresh);
+      }
+    }
     if (backend === "orca" && r.lastInstruction && !["cancelled", "human_handoff"].includes(r.lastInstruction.terminalState)) {
       const request = r.lastInstruction.requestId;
-      if (next.requestId !== request) { next.requestId = request; next.observation = {}; next.handoff = null; }
+      if (next.requestId !== request) { next.requestId = request; next.observation = r.observation || {}; next.handoff = null; }
       const turn = observe(r.sessionId, r.cwd, r.lastInstruction, next.observation || {}); next.observation = turn;
+      if (turn.notificationBoundaryRepaired) next.humanActivity = null;
       completed = turn.completed && !turn.failed && !turn.changed && !turn.gap && !turn.ambiguous;
       if (turn.backgroundOutstanding && turn.completed) { emit("needs_input", `${request}:background_unverified`); completed = false; }
       if (turn.failed) emit("instruction_failed", request);
       if (turn.changed || turn.gap || turn.ambiguous && !turn.nextUserObserved) emit("recovery_uncertain", request);
-      if (now - (next.lastProbeAt || 0) >= 5000) {
-        try {
-          next.probe = await probe(r); next.lastProbeAt = now;
-          if (next.probe.stale) emit("recovery_uncertain", `${request}:stale`);
-          if (next.probe.needsInput) emit("needs_input", `${request}:${next.probe.revision}`);
-        } catch (error) { next.probe = { error: error.code || "PROBE_FAILED" }; emit("recovery_uncertain", `${request}:${next.probe.error}`); }
-      }
-      completed = completed && !next.probe?.busy && !next.probe?.stale && !next.probe?.error;
+      completed = completed && !next.probe?.busy && !next.probe?.stale && !next.probe?.error && !next.probe?.draft;
       if (completed && !turn.nextUserObserved && r.owner !== "human") emit("instruction_completed", request);
       if (turn.logged) {
         const recordFile = path.join(root, "orca", "会话", `${r.id}.json`), fresh = readJson(recordFile);
         if (fresh?.lastInstruction?.requestId === request && fresh.state === "attached" && fresh.controlRevision === r.controlRevision) {
           fresh.observation = turn; fresh.lastInstruction.state = turn.failed ? "failed" : completed ? "completed" : "logged";
-          if (turn.nextUserObserved || next.probe?.draft) fresh.owner = "human";
+          if (turn.notificationBoundaryRepaired) fresh.humanActivity = null;
+          if (turn.nextUserObserved) fresh.owner = "human";
           fresh.revision = hash(JSON.stringify([fresh.lastInstruction.state, turn.text, turn.ambiguous, turn.changed, turn.available, fresh.owner, fresh.cancelRequested, turn.backgroundOutstanding]));
           writeJson(recordFile, fresh);
         }
@@ -64,7 +74,7 @@ export async function observeLocalRecords(controller, { root = MANAGED_ROOT, obs
     }
     if (backend === "orca" && !r.cancelRequested) {
       const boundary = next.observation?.humanBoundary;
-      const saved = r.humanActivity || next.humanActivity || { cursor: boundary || r.managementCursor || r.observation?.cursor || { offset: r.lastInstruction?.baseline || 0 }, background: next.observation?.background || r.observation?.background || {} };
+      const saved = next.observation?.notificationBoundaryRepaired ? { cursor: boundary || next.observation.cursor, background: next.observation.background || {} } : r.humanActivity || next.humanActivity || { cursor: boundary || r.managementCursor || r.observation?.cursor || { offset: r.lastInstruction?.baseline || 0 }, background: next.observation?.background || r.observation?.background || {} };
       // 原指令仍在执行时由其观察器定位人类边界，避免把桥接器自己的指令算作人类输入。
       if (boundary || r.owner === "human" || r.lastInstruction?.terminalState === "human_handoff" || !r.lastInstruction) {
         const activity = observeHumanActivity(r.sessionId, r.cwd, saved); next.humanActivity = activity;

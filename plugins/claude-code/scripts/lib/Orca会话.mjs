@@ -74,13 +74,20 @@ function transcriptFile(sessionId) {
 export function readTurn(sessionId, cwd, instruction, saved = {}) { return observeInstruction(sessionId, cwd, instruction, saved); }
 
 export async function probeOrcaRecord(r, call = orcaCall) {
-  const shown = await call(["terminal", "show", "--terminal", r.terminalId], r.cwd), terminal = shown.result.terminal;
-  if (shown._meta?.runtimeId !== r.runtimeId || terminal.incarnationId !== r.incarnationId || !terminal.connected || !terminal.writable || terminal.agentIdentity !== "claude") return { stale: true };
+  let shown;
+  try { shown = await call(["terminal", "show", "--terminal", r.terminalId], r.cwd); }
+  catch (error) { if (error.code === "terminal_handle_stale") return { stale: true, code: error.code }; throw error; }
+  const terminal = shown.result.terminal;
+  if (shown._meta?.runtimeId !== r.runtimeId || terminal.incarnationId !== r.incarnationId || normalized(terminal.worktreePath) !== normalized(r.cwd) || !terminal.connected || !terminal.writable || terminal.agentIdentity !== "claude") return { stale: true, code: "BINDING_STALE" };
   const screen = (await call(["terminal", "read", "--terminal", r.terminalId, "--limit", "24"], r.cwd)).result.terminal;
   const lines = screen.tail || [];
   const busy = lines.some((line) => /^\s*[✢✳✻✶✽].*…|(?:Generating|Thinking|Working).*…|esc to interrupt/i.test(line));
   const needsInput = lines.some((line) => /Do you want to|Permission rule .*requires confirmation/i.test(line)) && lines.some((line) => /^\s*[❯>]\s*1\.\s*(?:Yes|Allow)/i.test(line));
-  return { busy, needsInput, draft: Boolean(screen.draft), revision: crypto.createHash("sha256").update(JSON.stringify([busy, needsInput, screen.draft || ""])).digest("hex") };
+  const draft = typeof screen.draft === "string" ? screen.draft : "";
+  const fingerprint = draft ? crypto.createHash("sha256").update(draft).digest("hex") : null;
+  const matchesBridge = Boolean(fingerprint && r.lastInstruction?.sentPromptHash === fingerprint);
+  return { busy, needsInput, draft: Boolean(screen.draft), draftEvidence: { present: Boolean(screen.draft), length: draft.length, fingerprint,
+    source: "unknown", matchesBridgeRequest: matchesBridge }, revision: crypto.createHash("sha256").update(JSON.stringify([busy, needsInput, fingerprint])).digest("hex") };
 }
 
 export function createOrcaAdapter({ call = orcaCall, root = path.join(MANAGED_ROOT, "orca"), observe = readTurn } = {}) {
@@ -89,13 +96,13 @@ export function createOrcaAdapter({ call = orcaCall, root = path.join(MANAGED_RO
   const records = () => { try { return fs.readdirSync(folder).filter((f) => f.endsWith(".json")).map((f) => readJson(path.join(folder, f))).filter(Boolean); } catch { return []; } };
   const summary = (r) => ({ id: r.id, controllerId: r.controllerId, sessionId: r.sessionId, cwd: r.cwd,
     terminalId: r.terminalId, incarnationId: r.incarnationId, runtimeId: r.runtimeId, createdByPlugin: r.createdByPlugin,
-    state: r.state, owner: r.owner || "codex", management: r.state === "attached" ? "retained" : "released", humanActivity: r.humanActivity || null, model: r.model, profile: effectiveProfile(r), revision: r.revision || null, lastInstruction: r.lastInstruction ? { requestId: r.lastInstruction.requestId,
+    state: r.state, owner: r.owner || "codex", management: r.state === "attached" ? "retained" : "released", terminalBlocker: r.terminalBlocker || null, humanActivity: r.humanActivity || null, model: r.model, profile: effectiveProfile(r), revision: r.revision || null, lastInstruction: r.lastInstruction ? { requestId: r.lastInstruction.requestId,
       state: r.lastInstruction.state, orcaRequestId: r.lastInstruction.orcaRequestId } : null });
 
   async function bound(r) {
     const response = await call(["terminal", "show", "--terminal", r.terminalId], r.cwd), t = response.result.terminal;
     if (response._meta?.runtimeId !== r.runtimeId || t.incarnationId !== r.incarnationId || normalized(t.worktreePath) !== normalized(r.cwd) || !t.connected || !t.writable || t.agentIdentity !== "claude") {
-      throw new Error("Orca 运行时、终端实例或目录已变化，须重新列出并按原会话 ID 接入；不会自动重开或双发");
+      throw Object.assign(new Error("Orca 运行时、终端实例或目录已变化，须重新列出并按原会话 ID 接入；不会自动重开或双发"), { code: "BINDING_STALE" });
     }
     return t;
   }
@@ -109,6 +116,7 @@ export function createOrcaAdapter({ call = orcaCall, root = path.join(MANAGED_RO
     const idle = await call(["terminal", "wait", "--terminal", t.handle, "--for", "tui-idle", "--timeout-ms", "1000"], cwd);
     if (!idle.result.wait.satisfied) throw new Error(`Claude 尚未空闲：${idle.result.wait.blockedReason || "当前轮未结束"}`);
     const before = await screen(t, cwd);
+    if (before.draft) throw new Error("存在未发送草稿，来源尚未确认；保留内容，不能注入/status、Esc或任务");
     if (before.tail.some((line) => /^\s*[✢✳✻✶✽].*…|(?:Generating|Thinking|Working).*…|esc to interrupt/i.test(line))) throw new Error("屏幕仍有执行信号，不能把空输入框当成工作已停止");
     let identity = statusIdentity(before.tail), opened = false;
     if (!identity) {
@@ -147,6 +155,39 @@ export function createOrcaAdapter({ call = orcaCall, root = path.join(MANAGED_RO
     return { ...summary(r), unchanged, turn: unchanged ? null : { ...short, ...(args.include_text ? { text } : {}) } };
   }
 
+  async function rebind(r, args, checkedTerminal, checkedResponse, verified) {
+    if (args.idle_confirmed !== true) throw new Error("重绑定须确认人类当前轮、队列与草稿已处理");
+    let response = checkedResponse, target = checkedTerminal, checked = verified;
+    if (!target) {
+      response = await call(["terminal", "list", "--worktree", `path:${r.cwd}`, "--limit", "100"], r.cwd);
+      if (response.result.truncated) throw new Error("终端列表不完整，不自动选择替代终端");
+      const candidates = response.result.terminals.filter((t) => t.agentIdentity === "claude" && t.connected && t.writable && normalized(t.worktreePath) === normalized(r.cwd) && (!args.terminal_id || t.handle === args.terminal_id));
+      if (args.terminal_id) {
+        if (candidates.length !== 1) throw new Error("指定替代终端不存在或不唯一");
+        target = candidates[0];
+      } else {
+        const matches = [];
+        for (const candidate of candidates) {
+          const view = await screen(candidate, r.cwd), seen = statusIdentity(view.tail || []);
+          if (seen?.sessionId === r.sessionId && normalized(seen.cwd) === normalized(r.cwd)) matches.push(candidate);
+        }
+        if (matches.length !== 1) throw new Error("未找到只读身份唯一匹配的替代终端；请从 list 指定 terminal_id，不猜测或重开");
+        target = matches[0];
+      }
+    }
+    if (records().some((other) => other.state === "attached" && other.id !== r.id && (other.terminalId === target.handle || other.sessionId === r.sessionId))) throw new Error("替代终端或该Claude会话被其他接入记录占用");
+    checked ||= await identity(target, r.cwd);
+    if (checked.sessionId !== r.sessionId || normalized(checked.cwd) !== normalized(r.cwd)) throw new Error("替代终端真实Claude身份不匹配，保留原绑定");
+    const final = await call(["terminal", "show", "--terminal", target.handle], r.cwd), finalTerminal = final.result.terminal;
+    if (final._meta?.runtimeId !== response._meta?.runtimeId || finalTerminal.incarnationId !== target.incarnationId || !finalTerminal.connected || !finalTerminal.writable || normalized(finalTerminal.worktreePath) !== normalized(r.cwd) || finalTerminal.agentIdentity !== "claude") throw new Error("身份握手期间Orca实例变化，保留原绑定");
+    const fresh = readJson(recordPath(r.id));
+    if (!fresh || fresh.controlRevision !== r.controlRevision || fresh.state !== "attached") throw new Error("重绑定期间原记录变化，停止写入");
+    r.bindingHistory = [...(r.bindingHistory || []), { terminalId: r.terminalId, incarnationId: r.incarnationId, runtimeId: r.runtimeId, at: new Date().toISOString() }].slice(-20);
+    r.terminalId = target.handle; r.incarnationId = target.incarnationId; r.runtimeId = response._meta.runtimeId;
+    r.controlRevision = (r.controlRevision || 0) + 1; r.terminalBlocker = null; writeJson(recordPath(r.id), r);
+    return { ...summary(r), binding: { state: "verified", rebound: true }, message: "保留原接入编号、指令、游标与交付关联；未重开、未重发" };
+  }
+
   async function operation(args, master) {
     if (args.action === "history") return readHistory(args);
     if (args.action === "list") {
@@ -174,10 +215,15 @@ export function createOrcaAdapter({ call = orcaCall, root = path.join(MANAGED_RO
           if (checked.sessionId !== args.session_id.toLowerCase()) continue;
           const existing = active.find((r) => r.terminalId === t.handle);
           if (existing) {
-            if (existing.sessionId !== checked.sessionId || existing.incarnationId !== t.incarnationId || existing.runtimeId !== response._meta.runtimeId) throw new Error("原接入绑定已失效，请先释放旧记录");
+            if (existing.sessionId !== checked.sessionId) throw new Error("原接入绑定的Claude身份变化，不替换目标会话");
+            if (existing.incarnationId !== t.incarnationId || existing.runtimeId !== response._meta.runtimeId) return rebind(existing, args, t, response, checked);
             return { ...summary(existing), duplicate: true };
           }
-          if (active.some((r) => r.sessionId === checked.sessionId)) throw new Error("该 Claude 会话已经被另一条 Orca 接入记录占用");
+          const sameSession = active.find((r) => r.sessionId === checked.sessionId);
+          if (sameSession) {
+            if (sameSession.controllerId !== master || normalized(sameSession.cwd) !== normalized(args.cwd)) throw new Error("该 Claude 会话已经被另一条 Orca 接入记录占用");
+            return rebind(sameSession, args, t, response, checked);
+          }
           const r = { id: crypto.randomUUID(), controllerId: master, ...checked, cwd: args.cwd, terminalId: t.handle,
             incarnationId: t.incarnationId, runtimeId: response._meta.runtimeId, createdByPlugin: false, state: "attached", coordinationProfile: args.profile || null, createdAt: new Date().toISOString() };
           const file = transcriptFile(r.sessionId); r.managementCursor = { offset: file ? fs.statSync(file).size : 0 };
@@ -201,7 +247,13 @@ export function createOrcaAdapter({ call = orcaCall, root = path.join(MANAGED_RO
     if (!r || r.controllerId !== master) throw new Error("该 Orca 接入记录不属于当前 Codex 主控");
     if (r.state !== "attached") throw new Error("接入已释放或关闭，须重新接入");
     if (args.action === "release") { r.controlRevision = (r.controlRevision || 0) + 1; r.state = "released"; writeJson(recordPath(r.id), r); return { ...summary(r), terminalKeptAlive: true }; }
-    const t = await bound(r);
+    if (args.action === "rebind") return rebind(r, args);
+    let t;
+    try { t = await bound(r); }
+    catch (error) {
+      if (args.action === "status" && ["terminal_handle_stale", "BINDING_STALE"].includes(error.code)) return { ...summary(r), binding: { state: "stale", code: error.code }, terminal: { connected: false }, nextAction: "list后按精确Claude UUID与原目录调用rebind，保留原记录；不要继续等交付" };
+      throw error;
+    }
     if (args.action === "human_activity") {
       const activity = observeHumanActivity(r.sessionId, r.cwd, r.humanActivity || { cursor: r.observation?.humanBoundary || r.managementCursor || r.observation?.cursor || {} });
       const fresh = readJson(recordPath(r.id));
@@ -216,6 +268,8 @@ export function createOrcaAdapter({ call = orcaCall, root = path.join(MANAGED_RO
       if (!diagnosis.repairable) throw new Error("停留边界不是可识别通知，不能跳过人类输入或损坏记录");
       r.controlRevision = (r.controlRevision || 0) + 1;
       r.observation = { ...r.observation, nextUserObserved: false, ambiguous: false, humanInputEvidence: null, completed: false };
+      // 重新从通知边界分类，丢弃旧识别器把系统通知累计成人类输入的缓存。
+      r.humanActivity = null;
       writeJson(recordPath(r.id), r);
       return { ...updateTurn(r), cursorRepaired: true, ownerKept: true };
     }
@@ -283,6 +337,7 @@ export function createOrcaAdapter({ call = orcaCall, root = path.join(MANAGED_RO
     r.humanActivity = null; r.managementCursor = { offset: r.lastInstruction.baseline };
     const docs = args.process_docs === false ? null : prepareRecordDocuments(r, args.prompt);
     const sentPrompt = args.prompt + `\n\n${marker}` + (docs ? deliveryInstruction(r, docs) : "");
+    r.lastInstruction.sentPromptHash = crypto.createHash("sha256").update(sentPrompt).digest("hex");
     writeJson(recordPath(r.id), r);
     // 写入不明时禁止自动重发；请求日志保留 pending，后续只读取实际状态。
     const response = await call(["terminal", "send", "--terminal", r.terminalId, "--text", sentPrompt, "--enter", "--wait-submit", "10"], r.cwd);
@@ -296,7 +351,7 @@ export function createOrcaAdapter({ call = orcaCall, root = path.join(MANAGED_RO
   return async (args = {}) => {
     const master = args.controller_id || controllerId();
     if (!master) throw new Error("请提供 Codex 主控任务 ID");
-    const mutate = ["create", "attach", "send", "release", "close", "takeover", "cancel", "repair_cursor"].includes(args.action);
+    const mutate = ["create", "attach", "send", "release", "close", "takeover", "cancel", "repair_cursor", "rebind"].includes(args.action);
     if (!mutate) return operation(args, master);
     if (!args.request_id || typeof args.request_id !== "string" || args.request_id.length > 120) throw new Error("改变 Orca 会话须提供稳定 request_id");
     // 跨 MCP 进程串行修改，崩溃后的请求保持不明状态，不能凭空重复新建或发送。

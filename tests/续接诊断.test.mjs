@@ -131,3 +131,70 @@ test("原生人类队列结束才可处理完成事件，Codex待发箱不冒充
   state.writeRuntime(id, { busy: false, humanQueued: 0, queue: [{ id: "Codex待发" }] }); assert.equal(wake.currentWakeEvents(folder, events, controller).length, 1);
   assert.equal(events[0].humanCursor.offset, 10);
 });
+test("真实系统任务通知字段不改变控制权并清除已知后台任务", () => {
+  const f = fixture(), text = '<task-notification>\n<task-id>后台一</task-id>\n<tool-use-id>工具一</tool-use-id>\n<status>completed</status>\n<summary>Agent finished</summary>\n</task-notification>';
+  const notification = f.row("user", text, { origin: { kind: "task-notification", producer: "session-task" }, promptSource: "system", turnOrigin: "task_notification", userType: "external" });
+  f.append(f.row("user", "桥接任务"), f.row("assistant", "", { message: { content: [{ type: "tool_use", id: "工具一", input: { run_in_background: true } }] } }), f.row("assistant", "主轮完成"), notification, f.row("assistant", "最终交付"));
+  assert.equal(reader.messageOrigin(notification), "task_notification");
+  const turn = reader.observeInstruction(f.session, f.cwd, f.r.lastInstruction); assert.equal(turn.completed, true); assert.equal(turn.backgroundOutstanding, false); assert.equal(Boolean(turn.nextUserObserved), false);
+  assert.equal(reader.messageOrigin(f.row("user", text)), "human_input");
+  assert.equal(reader.observeHumanActivity(f.session, f.cwd, { cursor: { offset: f.baseline }, userCount: 0 }).userCount, 1);
+});
+test("独立故障经原编号核对后可恢复，关闭配置与待办不变且不调用模型", async () => {
+  const f = fixture(); queue.writeWakeJson(path.join(f.folder, "config.json"), { enabled: false, controllerId: f.controller });
+  const fault = diag.recordSchedulerFault(f.folder, new Error("已修复的调度错误"), { stage: "observe_records" }, { fatal: true });
+  const result = await wake.wakeControl({ action: "resolve_fault", controller_id: f.controller, fault_id: fault.id, resolution: "补丁已安装，状态已核对", decision: "retry" });
+  assert.equal(result.paused, false); assert.equal(result.enabled, false); assert.equal(result.modelCalls, 0); assert.equal(diag.schedulerFaults(f.folder, fault.id).state, "resolved");
+});
+test("草稿来源未知时生成一次明确待办，不冒充人类输入或完成派发", async () => {
+  const f = fixture(); f.append(f.row("user", "桥接任务"), f.row("assistant", "完成"));
+  const options = { probe: async () => ({ busy: false, draft: true, draftEvidence: { present: true, source: "unknown", fingerprint: "固定指纹", length: 20 } }) };
+  await watcher.observeLocalRecords(f.controller, options); await watcher.observeLocalRecords(f.controller, options);
+  assert.equal(f.record().owner, "codex"); assert.equal(f.record().terminalBlocker.source, "unknown");
+  const events = queue.pendingWakeEvents(f.folder); assert.equal(events.filter((e) => e.type === "draft_blocked").length, 1); assert.equal(events.some((e) => e.type === "instruction_completed"), false);
+});
+test("故障恢复保持事件，错误编号不解锁，确认和重复恢复可核对", async () => {
+  const f = fixture(); const pending = queue.pendingWakeEvents(f.folder);
+  queue.writeWakeJson(path.join(f.folder, "config.json"), { enabled: false, controllerId: f.controller });
+  const fault = diag.recordSchedulerFault(f.folder, new Error("待修复"), { stage: "observe_records" }, { fatal: true });
+  const args = { action: "resolve_fault", controller_id: f.controller, fault_id: fault.id, resolution: "接口与读取器已修复", decision: "acknowledge" };
+  await assert.rejects(wake.wakeControl({ ...args, fault_id: crypto.randomUUID() }), /精确故障编号/);
+  assert.equal((await wake.wakeControl(args)).paused, true);
+  assert.equal((await wake.wakeControl({ ...args, decision: "retry" })).paused, false);
+  assert.equal((await wake.wakeControl({ ...args, decision: "retry" })).duplicate, true);
+  assert.deepEqual(queue.pendingWakeEvents(f.folder), pending);
+});
+test("CLI与调度故障独立处理；未核对CLI时不能解除调度暂停", async () => {
+  const f = fixture(); queue.writeWakeJson(path.join(f.folder, "config.json"), { enabled: false, controllerId: f.controller });
+  const run = crypto.randomUUID(); queue.writeWakeJson(path.join(f.folder, "runs", `${run}.json`), { id: run, state: "uncertain", cliPid: null, events: [] });
+  queue.writeWakeJson(path.join(f.folder, "runtime.json"), { activeRunId: run, paused: true });
+  const fault = diag.recordSchedulerFault(f.folder, new Error("调度异常"), {}, { fatal: true });
+  const args = { action: "resolve_fault", controller_id: f.controller, fault_id: fault.id, resolution: "修复已核对", decision: "retry" };
+  await assert.rejects(wake.wakeControl(args), /CLI运行待核对/);
+  const handled = await wake.wakeControl({ action: "resolve", controller_id: f.controller, run_id: run, decision: "acknowledge" }); assert.equal(handled.paused, true); assert.equal(handled.currentFault.id, fault.id);
+  assert.equal((await wake.wakeControl(args)).paused, false);
+});
+test("失联与草稿异常绕过临时操作权过滤，草稿清空会再次提示协调", async () => {
+  const f = fixture(); f.r.owner = "human"; f.r.lastInstruction = null; state.writeJson(path.join(state.MANAGED_ROOT, "orca", "会话", `${f.id}.json`), f.r);
+  await watcher.observeLocalRecords(f.controller, { now: 10000, probe: async () => ({ stale: true, code: "terminal_handle_stale" }) });
+  const pending = queue.pendingWakeEvents(f.folder); assert.equal(pending.some((e) => e.type === "binding_stale"), true); assert.equal(wake.currentWakeEvents(f.folder, pending, f.controller).length, 1);
+  await watcher.observeLocalRecords(f.controller, { now: 16000, probe: async () => ({ draft: true, draftEvidence: { source: "unknown", fingerprint: "草稿" } }) });
+  await watcher.observeLocalRecords(f.controller, { now: 22000, probe: async () => ({ draft: false }) });
+  assert.equal(queue.pendingWakeEvents(f.folder).some((e) => e.type === "draft_cleared"), true);
+});
+test("旧缓存系统通知边界重分类，不重复累计假人类指令", async () => {
+  const f = fixture(), entry = f.row("user", '<task-notification><task-id>后台</task-id><status>completed</status></task-notification>', { origin: { kind: "task-notification", producer: "session-task" }, promptSource: "system", turnOrigin: "task_notification" });
+  f.append(f.row("user", "桥接任务"), f.row("assistant", "主轮完成")); const offset = fs.statSync(f.file).size; f.append(entry, f.row("assistant", "最终交付"));
+  f.r.owner = "human"; f.r.observation = { logged: true, completed: false, ambiguous: true, nextUserObserved: true, cursor: { offset }, humanBoundary: { offset }, humanInputEvidence: { uuid: entry.uuid } };
+  f.r.humanActivity = { userCount: 1, mainTurnEnded: true, cursor: { offset: fs.statSync(f.file).size }, firstUserCursor: { offset } };
+  state.writeJson(path.join(state.MANAGED_ROOT, "orca", "会话", `${f.id}.json`), f.r);
+  await watcher.observeLocalRecords(f.controller, { probe: async () => ({ busy: false, draft: true, draftEvidence: { source: "unknown" } }) });
+  const r = f.record(); assert.equal(r.observation.nextUserObserved, false); assert.equal(r.observation.ambiguous, false); assert.equal(r.humanActivity.userCount, 0); assert.equal(r.owner, "human");
+});
+test("已配对的本地命令回执不冒充第二条人类任务，也不等不存在的模型轮", () => {
+  const f = fixture(), command = f.row("user", '<command-name>/model</command-name><command-message>model</command-message><command-args></command-args>', { userType: "external", entrypoint: "cli" });
+  f.append(command, f.row("user", '<local-command-stdout>Set model</local-command-stdout>', { parentUuid: command.uuid, userType: "external", entrypoint: "cli" }));
+  const result = reader.observeHumanActivity(f.session, f.cwd, { cursor: { offset: f.baseline } }); assert.equal(result.userCount, 1); assert.equal(result.completed, true);
+  const quoted = fixture(); quoted.append(quoted.row("user", '<local-command-stdout>这是引用</local-command-stdout>'));
+  assert.equal(reader.observeHumanActivity(quoted.session, quoted.cwd, { cursor: { offset: quoted.baseline } }).completed, false);
+});
