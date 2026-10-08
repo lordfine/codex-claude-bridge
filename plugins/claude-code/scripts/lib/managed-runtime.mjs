@@ -7,8 +7,23 @@ import { fileURLToPath } from "node:url";
 const PLUGIN_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const brokerRequire = createRequire(new URL("../managed-broker.mjs", import.meta.url));
 
+function prepareDarwinHelper() {
+  if (process.platform !== "darwin") return;
+  const root = fs.realpathSync(path.dirname(brokerRequire.resolve("node-pty/package.json")));
+  // node-pty 1.1.0 部分 npm 包缺少 spawn-helper 执行位，上游 #850/#919。
+  for (const dir of ["build/Release", "build/Debug", `prebuilds/darwin-${process.arch}`]) {
+    const file = path.join(root, dir, "spawn-helper");
+    if (!fs.existsSync(file)) continue;
+    if (!fs.lstatSync(file).isFile() || fs.lstatSync(file).isSymbolicLink() || !fs.realpathSync(file).startsWith(root + path.sep)) throw new Error("终端启动辅助文件边界异常");
+    const mode = fs.statSync(file).mode;
+    if (!(mode & 0o100)) fs.chmodSync(file, mode | 0o100);
+    fs.accessSync(file, fs.constants.X_OK);
+  }
+}
+
 export function ensurePtyRuntime() {
   try {
+    prepareDarwinHelper();
     brokerRequire("node-pty");
     return { ready: true, installed: false };
   } catch (error) {
@@ -26,7 +41,7 @@ export function ensurePtyRuntime() {
   try {
     execFileSync(command, args, { cwd: PLUGIN_ROOT, timeout: 180_000,
       windowsHide: true, stdio: "pipe" });
-    brokerRequire("node-pty");
+    prepareDarwinHelper(); brokerRequire("node-pty");
   } catch (error) {
     throw new Error(`原生终端依赖安装失败（退出码 ${error.status ?? "未知"}）。请在插件目录 ${PLUGIN_ROOT} 运行 npm install。`);
   }
