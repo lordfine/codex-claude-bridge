@@ -1,5 +1,6 @@
 import path from "node:path";
 import fs from "node:fs";
+import { findSession } from "./会话读取.mjs";
 
 const CREDENTIAL_NAME = /(?:^|[\s'"=:\\/])(?:\.env(?:\.[^\s'"\\/]*)?|\.ssh|id_(?:rsa|ed25519)|credentials?(?:\.[^\s'"\\/]*)?|secrets?(?:\.[^\s'"\\/]*)?|\.aws|\.kube)(?=$|[\s'"\\/])/i;
 const DANGEROUS_COMMAND = /(?:\brm\s+-[a-z]*r|\bRemove-Item\b[^\n]*(?:-Recurse|-Force)|\bdel\s+\/s|\bgit\s+(?:push|reset\s+--hard|rebase|filter-repo)|\b(?:ssh|scp|rsync)\b|\b(?:kubectl|terraform|ansible|pg_dump|psql)\b|\bdocker\s+compose\b[^\n]*\b(?:up|down|run|exec)\b|\b(?:curl|wget|Invoke-WebRequest)\b[^\n]*(?:-X\s*(?:POST|PUT|PATCH|DELETE)|-Method\s*(?:Post|Put|Patch|Delete)))/i;
@@ -54,6 +55,13 @@ export function classifyPermission(request, task) {
   }
 
   if (file && CREDENTIAL_NAME.test(file)) return { kind: "user", reason: "凭据路径" };
+  if (tool === "Read" && file && path.isAbsolute(file)) {
+    try {
+      const sessionFile = findSession(task.sessionId, task.cwd);
+      const ownResults = path.join(path.dirname(sessionFile), task.sessionId.toLowerCase(), "tool-results");
+      if (!fs.lstatSync(ownResults).isSymbolicLink() && inside(fs.realpathSync(ownResults), fs.realpathSync(file))) return { kind: "allow", reason: "本会话自有工具结果只读" };
+    } catch { /* 无法确认精确会话归属时继续正常审批。 */ }
+  }
   if (file.startsWith("~")) return { kind: "codex", reason: "主目录路径" };
   const absolute = file ? path.resolve(cwd, file) : "";
   if (file && !inside(cwd, absolute)) {
@@ -85,7 +93,8 @@ export function classifyPermission(request, task) {
   if (["Bash", "PowerShell"].includes(tool)) {
     if (CREDENTIAL_NAME.test(command)) return { kind: "user", reason: "命令可能读取凭据" };
     if (DANGEROUS_COMMAND.test(command)) return { kind: "codex", reason: "敏感系统或远端命令" };
-    if (isSafeCommand(command, cwd)) return { kind: "allow", reason: "常见本地检查或构建" };
+    const normalizedCommand = command.replace(/^(python(?:3)?)\s+-X\s+utf8\s+-m\s+/i, "$1 -m ");
+    if (isSafeCommand(normalizedCommand, cwd)) return { kind: "allow", reason: "常见本地检查或构建" };
     return { kind: "codex", reason: "未归类的命令" };
   }
   return { kind: "codex", reason: "未归类的工具" };

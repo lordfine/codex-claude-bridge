@@ -16,6 +16,7 @@ const SETUP_TOOL = {
 };
 
 const MANAGED_TOOLS = [
+  { name: "delegate_overview", description: "一次读取主控的原生与Orca短进度，包含执行线、会话、工作区、交付快照和暂停待办。无变化结束模型轮；force仅用于用户主动查询。", inputSchema: { type: "object", properties: { controller_id: { type: "string" }, after_revision: { type: "string" }, limit: { type: "integer", minimum: 1, maximum: 50 } }, additionalProperties: false } },
   {
     name: "delegate_coordination", description: "读取或设置主控的低/中/高协作档位，默认 medium；可逐任务覆盖。prepare 创建忽略 Git 的过程记录；snapshot 核对实际工作目录；handoff 只返回已核验短交付单。普通进度不调用模型，重大异常和需要决定的交付即时处理。",
     inputSchema: { type: "object", properties: {
@@ -34,12 +35,12 @@ const MANAGED_TOOLS = [
   {
     name: "delegate_orca", description: "管理 Orca 原生 Claude 会话。status 默认短状态，用 after_revision 去重；transcript/history 按正文游标分页，read 的 screen_revision 独立去重屏幕。取消返回请求状态，不能据此声称后台全部停止。通过 delegate_wake 可接入本地事件续接；仍不提供 Orca 自动合并和统一执行预算。",
     inputSchema: { type: "object", properties: {
-      action: { type: "string", enum: ["list", "create", "attach", "send", "status", "read", "wait", "release", "close", "takeover", "cancel", "transcript", "history"] },
+      action: { type: "string", enum: ["list", "create", "attach", "send", "status", "read", "wait", "release", "close", "takeover", "cancel", "transcript", "history", "diagnose", "repair_cursor"] },
       controller_id: { type: "string" }, cwd: { type: "string" }, id: { type: "string" },
       session_id: { type: "string" }, terminal_id: { type: "string" }, idle_confirmed: { type: "boolean" },
       request_id: { type: "string" }, title: { type: "string" }, model: { type: "string" }, prompt: { type: "string" },
       profile: { type: "string", enum: ["low", "medium", "high"] }, process_docs: { type: "boolean" }, include_text: { type: "boolean" }, stop_confirmed: { type: "boolean" },
-      after_revision: { type: "string" }, screen_revision: { type: "string" }, max_chars: { type: "integer" },
+      force: { type: "boolean" }, after_revision: { type: "string" }, screen_revision: { type: "string" }, max_chars: { type: "integer" },
       timeout_ms: { type: "integer", minimum: 1, maximum: 60000 }, cursor: { type: ["string", "object"] },
       limit: { type: "integer", minimum: 1, maximum: 300 }, close_attached_confirmed: { type: "boolean" }
     }, required: ["action"], additionalProperties: false }
@@ -54,7 +55,7 @@ const MANAGED_TOOLS = [
       model: { type: "string", description: "当前配置中的模型槽或实际模型名；省略则继承" },
       prompt: { type: "string", description: "可选的首条任务指令，待会话就绪后发送" },
       profile: { type: "string", enum: ["low", "medium", "high"] }, process_docs: { type: "boolean" },
-      max_minutes: { type: "integer" }, max_turns: { type: "integer" }, subagent_limit: { type: "integer" },
+      permission_wait_seconds: { type: "integer", minimum: 1, maximum: 900, description: "敏感审批等待Codex秒数，默认300；超时转人工并保留记录" }, max_minutes: { type: "integer", minimum: 0, maximum: 1440, description: "单个会话最大累计执行分钟数，审批与人类挂起暂停计时；默认 0 不限时，仅用户指定时设置正整数" }, max_turns: { type: "integer" }, subagent_limit: { type: "integer" },
       controller_id: { type: "string", description: "主控 Codex 任务 ID；通常从环境自动获取" },
       visible: { type: "boolean", description: "是否自动打开可见窗口，默认 true" }
     }, required: ["cwd"], additionalProperties: false }
@@ -65,7 +66,7 @@ const MANAGED_TOOLS = [
   },
   {
     name: "delegate_status", description: "读取托管任务状态和增量事件。",
-    inputSchema: { type: "object", properties: { task_id: { type: "string" }, cursor: { type: "integer" }, limit: { type: "integer" }, controller_id: { type: "string" } }, required: ["task_id"], additionalProperties: false }
+    inputSchema: { type: "object", properties: { task_id: { type: "string" }, force: { type: "boolean" }, cursor: { type: "integer" }, limit: { type: "integer" }, controller_id: { type: "string" } }, required: ["task_id"], additionalProperties: false }
   },
   {
     name: "delegate_transcript", description: "按需读取指定 Claude 会话近期的助手正文，用于查看实现交付或只读审查短报告。",
@@ -86,7 +87,7 @@ const MANAGED_TOOLS = [
     inputSchema: { type: "object", properties: { task_id: { type: "string" }, immediate: { type: "boolean" }, controller_id: { type: "string" } }, required: ["task_id"], additionalProperties: false }
   },
   {
-    name: "delegate_permissions", description: "读取或决定 Claude 敏感操作。未知操作由 Codex 决定；凭据等 user 类仅可拒绝，允许须用户在 Claude 窗口亲自操作。",
+    name: "delegate_permissions", description: "读取或决定 Claude 敏感操作。只传decision_id可查看原记录；仅actionable=true可决定，超时转人工后不能补写批准。未知操作由 Codex 决定；凭据等 user 类仅可拒绝，允许须用户在 Claude 窗口亲自操作。",
     inputSchema: { type: "object", properties: { task_id: { type: "string" }, decision_id: { type: "string" }, decision: { type: "string", enum: ["allow", "deny"] }, reason: { type: "string" }, controller_id: { type: "string" } }, required: ["task_id"], additionalProperties: false }
   },
   {
@@ -103,7 +104,7 @@ const MANAGED_TOOLS = [
   },
   {
     name: "delegate_review", description: "为已空闲的实现任务创建独立只读 Claude 审查会话，输出短报告，Codex 负责最终验收。",
-    inputSchema: { type: "object", properties: { task_id: { type: "string" }, focus: { type: "string" }, model: { type: "string" }, max_minutes: { type: "integer" }, controller_id: { type: "string" }, visible: { type: "boolean" } }, required: ["task_id"], additionalProperties: false }
+    inputSchema: { type: "object", properties: { task_id: { type: "string" }, focus: { type: "string" }, model: { type: "string" }, permission_wait_seconds: { type: "integer", minimum: 1, maximum: 900, description: "敏感审批等待Codex秒数，默认300；超时转人工并保留记录" }, max_minutes: { type: "integer", minimum: 0, maximum: 1440, description: "单个会话最大累计执行分钟数，审批与人类挂起暂停计时；默认 0 不限时，仅用户指定时设置正整数" }, controller_id: { type: "string" }, visible: { type: "boolean" } }, required: ["task_id"], additionalProperties: false }
   },
   {
     name: "delegate_diff", description: "列出实现任务相对基准提交的改动范围，供 Codex 验收；临时 /交还 命令文件须排除。",
@@ -136,7 +137,7 @@ const MANAGED_TOOLS = [
       cwd: { type: "string" }, goal: { type: "string" }, acceptance: { type: "string" }, detail: { type: "boolean" },
       item_id: { type: "string" }, model: { type: "string" }, feedback: { type: "string" },
       verification: { type: "string" }, summary: { type: "string" }, visible: { type: "boolean" },
-      max_minutes: { type: "integer" }, max_turns: { type: "integer" }, subagent_limit: { type: "integer" },
+      permission_wait_seconds: { type: "integer", minimum: 1, maximum: 900, description: "敏感审批等待Codex秒数，默认300；超时转人工并保留记录" }, max_minutes: { type: "integer", minimum: 0, maximum: 1440, description: "单个会话最大累计执行分钟数，审批与人类挂起暂停计时；默认 0 不限时，仅用户指定时设置正整数" }, max_turns: { type: "integer" }, subagent_limit: { type: "integer" },
       items: { type: "array", minItems: 1, maxItems: 10, items: { type: "object", properties: {
         label: { type: "string" }, prompt: { type: "string" }, model: { type: "string" }
       }, required: ["prompt"], additionalProperties: false } },
@@ -164,13 +165,13 @@ const MANAGED_TOOLS = [
       cwd: { type: "string" }, query: { type: "string" }, limit: { type: "integer" }, offset: { type: "integer" },
       session_id: { type: "string" }, source_task_id: { type: "string" }, existing_idle_confirmed: { type: "boolean" },
       request_id: { type: "string" }, alias: { type: "string" }, prompt: { type: "string" }, model: { type: "string" },
-      visible: { type: "boolean" }, max_minutes: { type: "integer" }, max_turns: { type: "integer" }, subagent_limit: { type: "integer" }
+      visible: { type: "boolean" }, permission_wait_seconds: { type: "integer", minimum: 1, maximum: 900, description: "敏感审批等待Codex秒数，默认300；超时转人工并保留记录" }, max_minutes: { type: "integer", minimum: 0, maximum: 1440, description: "单个会话最大累计执行分钟数，审批与人类挂起暂停计时；默认 0 不限时，仅用户指定时设置正整数" }, max_turns: { type: "integer" }, subagent_limit: { type: "integer" }
     }, required: ["action"], additionalProperties: false }
   },
   {
     name: "delegate_wake", description: "配置按关键 Claude 事件自动续接指定 Codex CLI 会话。只在 Codex 记录空闲时启动；同主控串行，失败或回执不明暂停。status 不调用模型；disable 停止自动接续；resolve 须核对暂停运行后明确确认或重试。",
     inputSchema: { type: "object", properties: {
-      action: { type: "string", enum: ["configure", "enable", "disable", "status", "resolve", "sync"] },
+      action: { type: "string", enum: ["configure", "enable", "disable", "status", "resolve", "sync", "inspect"] },
       task_id: { type: "string" }, backend: { type: "string", enum: ["native", "orca"] }, request_id: { type: "string" },
       controller_id: { type: "string" }, target_thread_id: { type: "string" }, cwd: { type: "string" },
       quiet_seconds: { type: "integer", minimum: 1, maximum: 30 }, run_id: { type: "string" },

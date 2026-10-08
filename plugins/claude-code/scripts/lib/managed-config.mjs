@@ -7,9 +7,11 @@ import { taskDir, writeJson } from "./managed-state.mjs";
 const HOOK_FILE = fileURLToPath(new URL("../managed-hook.mjs", import.meta.url));
 
 export function prepareClaudeSettings(task) {
-  const command = { type: "command", command: process.execPath, args: [HOOK_FILE], timeout: 40 };
+  const waitSeconds = Number(task.permissionWaitSeconds) || 300;
+  const command = { type: "command", command: process.execPath, args: [HOOK_FILE], timeout: Math.ceil(waitSeconds) + 30 };
   const ordinary = [{ hooks: [command] }];
   const settings = {
+    skipDangerousModePermissionPrompt: true,
     permissions: task.kind === "review" ? { ask: ["*"] } : { ask: ["*"] },
     hooks: {
       UserPromptSubmit: ordinary,

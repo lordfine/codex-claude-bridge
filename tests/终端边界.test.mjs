@@ -10,6 +10,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "ccpc-broker-boundary-"));
 process.env.CC_PLUGIN_CODEX_MANAGED_DIR = path.join(root, "状态");
+process.env.PATH = fileURLToPath(new URL("./fixtures/bin/", import.meta.url)) + path.delimiter + process.env.PATH;
 const state = await import("../plugins/claude-code/scripts/lib/managed-state.mjs");
 const broker = fileURLToPath(new URL("../plugins/claude-code/scripts/managed-broker.mjs", import.meta.url));
 
@@ -24,7 +25,6 @@ const fake = `const pty = { spawn(command, args, options) {
   } };
 } };`;
 const source = fs.readFileSync(broker, "utf8").replace('import pty from "node-pty";', fake)
-  .replace('taskPath, writeRuntime,', 'taskPath, writeJson, writeRuntime,')
   .replace(/from "(\.\/[^\"]+)"/g, (_, relative) => `from ${JSON.stringify(pathToFileURL(path.resolve(path.dirname(broker), relative)).href)}`);
 assert.ok(source.includes(fake), "ConPTY 夹具未替换，禁止启动真实模型");
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -70,14 +70,30 @@ test.after(() => {
   fs.rmSync(fs.realpathSync.native(root), { recursive: true, force: true });
 });
 
-test("实际桥接器默认 90 分钟累计预算到达时退出，默认子代理上限为 8", async () => {
-  const run = await start({ elapsedMs: 90 * 60000 - 500 });
+test("实际桥接器遵守单会话指定时长，默认子代理上限为 8", async () => {
+  const run = await start({ maxMinutes: 90, elapsedMs: 90 * 60000 - 500, initialPrompt: "模拟正在执行" });
   await finish(run);
   assert.equal(state.readTask(run.task.id).state, "timed_out");
   assert.ok(state.readEvents(run.task.id).events.some((event) => event.type === "time_limit_reached" && event.maxMinutes === 90));
   const startup = state.readJson(state.taskPath(run.task.id, "fixture.json"));
   assert.equal(startup.subagentLimit, "8");
   assert.ok(startup.args.includes("bypassPermissions"));
+  const runtime = state.readRuntime(run.task.id); assert.equal(runtime.busy, false); assert.equal(runtime.ready, false); assert.equal(runtime.current, null);
+});
+
+test("默认不限时，累计超过旧上限仍可执行；取消后活动状态收口", async () => {
+  const run = await start({ elapsedMs: 200 * 60000, initialPrompt: "持续执行" }); await delay(1100);
+  assert.notEqual(state.readRuntime(run.task.id).status, "exited");
+  await control(run.task.id, { type: "cancel" }); await finish(run);
+  assert.equal(state.readRuntime(run.task.id).busy, false); assert.equal(state.readRuntime(run.task.id).ready, false);
+});
+
+test("明确审批等待暂停执行预算，解决后继续计时", async () => {
+  const run = await start({ maxMinutes: 1, elapsedMs: 60000 - 400, initialPrompt: "等待审批" });
+  state.appendEvent(run.task.id, { type: "permission_pending", decisionId: "夹具审批", tool: "Bash" }); await delay(1300);
+  assert.notEqual(state.readRuntime(run.task.id).status, "exited"); assert.ok(state.readRuntime(run.task.id).waitingMs >= 1000);
+  state.appendEvent(run.task.id, { type: "permission_decided", decisionId: "夹具审批" }); await finish(run);
+  assert.equal(state.readTask(run.task.id).state, "timed_out");
 });
 
 test("实际桥接器默认 120 主轮预算，子代理结束不计主轮且上限 20 传入进程", async () => {

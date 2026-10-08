@@ -16,6 +16,7 @@ import { ensurePtyRuntime } from "./managed-runtime.mjs";
 import { roleModel } from "./managed-preferences.mjs";
 import { withSessionLock } from "./managed-lock.mjs";
 import { validateProfile, effectiveProfile, prepareRecordDocuments, deliveryInstruction } from "./协作策略.mjs";
+import { sessionProcessRunning } from "./平台适配.mjs";
 
 const BROKER = fileURLToPath(new URL("../managed-broker.mjs", import.meta.url));
 const WATCHDOG = fileURLToPath(new URL("../managed-watchdog.mjs", import.meta.url));
@@ -44,18 +45,7 @@ function isAlive(pid) {
 }
 
 export function claudeSessionStillRunning(task) {
-  if (process.platform !== "win32") return false;
-  if (!/^[0-9a-f-]{36}$/i.test(task.sessionId)) return true;
-  try {
-    const query = `(Get-CimInstance Win32_Process -Filter "Name='claude.exe' OR Name='node.exe' OR Name='cmd.exe'" | Where-Object { $_.CommandLine -match '--(?:resume|session-id)\\s+\"?${task.sessionId}(?:\"|\\s|$)' } | Measure-Object).Count`;
-    return Number(execFileSync("powershell.exe", ["-NoProfile", "-Command", query], {
-      // Windows 冷启动和并发 CI 中 CIM 查询可能超过五秒，超时仍按不明状态阻止续接。
-      encoding: "utf8", windowsHide: true, timeout: 15000
-    }).trim()) > 0;
-  } catch {
-    // 不能可靠确认进程已退出时，不启动第二份 Claude。
-    return true;
-  }
+  return sessionProcessRunning(task.sessionId);
 }
 
 function controllerSettings(id) {
@@ -86,7 +76,7 @@ function orderedQueue(id) {
       String(a.createdAt).localeCompare(String(b.createdAt)));
 }
 
-function invalidatePendingPermissions(task) {
+export function invalidatePendingPermissions(task) {
   const folder = path.join(taskDir(task.id), "pending");
   let names; try { names = fs.readdirSync(folder); } catch { return; }
   for (const name of names) {
@@ -94,7 +84,8 @@ function invalidatePendingPermissions(task) {
     const file = path.join(folder, name);
     const pending = readJson(file);
     if (!pending || pending.taskId !== task.id) continue;
-    try { fs.unlinkSync(file); } catch { continue; }
+    if (!["awaiting_codex", "awaiting_human", undefined].includes(pending.state)) continue;
+    writeJson(file, { ...pending, state: "invalidated", hookActive: false, invalidatedAt: new Date().toISOString(), reason: "原执行请求已失效" });
     appendEvent(task.id, { type: "permission_invalidated", decisionId: pending.id,
       reason: "原 Claude 进程已退出，旧工具调用不再有效" });
   }
@@ -160,7 +151,8 @@ function reconcile(task) {
   }
   task.recoveryAttempts = 1;
   task.resumeQueue = recoverQueuedInstructions(task, runtime);
-  if (runtime.startedAt) task.elapsedMs = Math.max(Number(task.elapsedMs) || 0,
+  if (runtime.timingMode === "execution") { task.elapsedMs = Math.max(Number(task.elapsedMs) || 0, Number(runtime.elapsedMs) || 0); task.waitingMs = Number(runtime.waitingMs) || 0; }
+  else if (runtime.startedAt) task.elapsedMs = Math.max(Number(task.elapsedMs) || 0,
     (Number(runtime.elapsedBaseMs) || 0) + Date.now() - Date.parse(runtime.startedAt));
   task.resume = transcriptExists;
   task.initialPrompt = null;
@@ -285,7 +277,8 @@ function createManagedTaskUnlocked(options = {}) {
   if (reviewTarget && (!options.review_ref || !/^[0-9a-f]{40}$/i.test(options.review_ref))) throw new Error("审查快照提交无效");
   const model = roleModel(reviewTarget?.source || source, kind, options.model);
   if (options.profile != null) validateProfile(options.profile);
-  const maxMinutes = integer(options.max_minutes, 90, 1, 1440, "执行时间");
+  const maxMinutes = integer(options.max_minutes, 0, 0, 1440, "执行时间");
+  const permissionWaitSeconds = integer(options.permission_wait_seconds, 300, 1, 900, "审批等待秒数");
   const maxTurns = integer(options.max_turns, 120, 1, 1000, "主会话轮数");
   const subagentLimit = integer(options.subagent_limit, 8, 1, 20, "子代理并发");
   ensurePtyRuntime();
@@ -327,7 +320,7 @@ function createManagedTaskUnlocked(options = {}) {
     attachRequestId: options.attach_request_id || null, attachSignature: options.attach_signature || null,
     attachAlias: options.attach_alias || null,
     autoVisible: options.visible !== false,
-    maxMinutes, maxTurns, subagentLimit,
+    maxMinutes, maxTurns, subagentLimit, permissionWaitSeconds, timingMode: "execution",
     configFingerprint: fingerprint(claudeSettingsPath()),
     createdAt: new Date().toISOString()
   };
@@ -392,7 +385,7 @@ export function createReviewTask(targetId, options = {}) {
   ].filter(Boolean).join("\n");
   return createManagedTask({
     cwd: target.cwd, kind: "review", review_of: targetId, review_ref: reviewRef, prompt,
-    model: options.model, max_minutes: options.max_minutes ?? 30,
+    model: options.model, max_minutes: options.max_minutes, permission_wait_seconds: options.permission_wait_seconds,
     workflow_id: target.workflowId, workflow_item_id: target.workflowItemId,
     workflow_operation_id: options.workflow_operation_id,
     controller_id: options.controller_id, visible: options.visible, profile: options.profile || target.coordinationProfile || undefined
@@ -400,7 +393,8 @@ export function createReviewTask(targetId, options = {}) {
 }
 
 export function taskSummary(task) {
-  const runtime = readRuntime(task.id);
+  const storedRuntime = readRuntime(task.id);
+  const runtime = storedRuntime?.status === "exited" ? { ...storedRuntime, ready: false, busy: false, current: null, activeSubagents: [], backgroundTasks: [], humanInFlightCount: 0, takeoverPending: false } : storedRuntime;
   const runtimeActive = runtime && runtime.status !== "exited" && isAlive(runtime.pid);
   let inboxCount = 0;
   try { inboxCount = fs.readdirSync(path.join(taskDir(task.id), "inbox")).filter((name) => /^[0-9a-f-]{36}\.json$/i.test(name)).length; } catch {}
@@ -410,7 +404,8 @@ export function taskSummary(task) {
     archivedAt: task.archivedAt || null, summary: task.archive?.summary || null,
     state: task.archivedAt ? "archived" : task.supersededBy ? "superseded" : runtimeActive ? runtime.status : task.state,
     sessionId: task.sessionId, cwd: task.cwd, worktree: task.worktree, branch: task.branch,
-    model: task.model || "inherit", owner: runtime?.owner || "codex", busy: runtime?.busy ?? null,
+    model: task.model || "inherit", owner: runtime?.owner || "codex", busy: runtime?.busy ?? null, ready: runtime?.ready ?? null,
+    maxMinutes: task.maxMinutes || 0, timing: { mode: runtime?.timingMode || task.timingMode || "legacy_wall", executionMs: runtime?.elapsedMs ?? task.elapsedMs ?? 0, waitingMs: runtime?.waitingMs ?? task.waitingMs ?? 0, totalMs: runtime?.totalMs ?? null },
     recoveryInterrupted: task.recoveryInterrupted || null,
     backgroundCount: runtime?.backgroundTasks?.length || 0,
     activeSubagentCount: runtime?.activeSubagents?.length || 0,
@@ -419,7 +414,7 @@ export function taskSummary(task) {
     workflowId: task.workflowId || null, workflowItemId: task.workflowItemId || null,
     takeoverPending: runtime?.takeoverPending || false, humanQueued: runtime?.humanQueued || 0, inboxCount,
     failure: runtime?.failure || null, queueLength: runtime?.queue?.length || 0,
-    pid: runtime?.pid || null, visible: runtime?.connected || false, createdAt: task.createdAt };
+    pid: runtime?.pid || null, visible: runtime?.connected || false, startupHints: runtime?.startupHints || null, createdAt: task.createdAt };
 }
 
 export function listManagedTasks(controllerIdValue, includeArchived = false) {
@@ -710,7 +705,7 @@ function resumeManagedTaskUnlocked(id, controllerIdValue) {
   if (task.supersededBy) throw new Error(`该会话已由任务 ${task.supersededBy} 续接，请使用新的执行记录`);
   if (task.archivedAt) throw new Error("任务已归档，请先恢复记录与工作树");
   if (["merged", "timed_out"].includes(task.state)) throw new Error("已合并或达到运行上限的任务不能原样恢复");
-  if ((task.elapsedMs || 0) >= (task.maxMinutes || 90) * 60_000) throw new Error("任务累计运行时间已达到上限，不能通过续接重置");
+  if (task.maxMinutes > 0 && (task.elapsedMs || 0) >= task.maxMinutes * 60_000) throw new Error("任务累计运行时间已达到上限，不能通过续接重置");
   const runtime = readRuntime(id);
   if (runtime?.status !== "exited" && isAlive(runtime?.pid) || task.state === "queued") return taskSummary(task);
   if (sessionReserved(task.sessionId, id)) throw new Error("该会话已由另一项任务占用，不能创建并发副本");
@@ -731,13 +726,14 @@ function resumeManagedTaskUnlocked(id, controllerIdValue) {
   return taskSummary(readTask(id));
 }
 
-export function pendingPermissions(id, controllerIdValue) {
+export function pendingPermissions(id, controllerIdValue, decisionId) {
   ownership(id, controllerIdValue);
   const folder = path.join(taskDir(id), "pending");
   let files; try { files = fs.readdirSync(folder); } catch { return []; }
-  return files.filter((name) => /^[0-9a-f-]+\.json$/.test(name))
+  const records = files.filter((name) => /^[0-9a-f-]+\.json$/.test(name))
     .map((name) => readJson(path.join(folder, name))).filter(Boolean)
-    .filter((pending) => !readJson(path.join(taskDir(id), "decisions", `${pending.id}.json`)));
+    .filter((pending) => decisionId ? pending.id === decisionId : [undefined, "awaiting_codex", "awaiting_human"].includes(pending.state));
+  return records.map((p) => ({ ...p, actionable: p.state === "awaiting_codex" && p.hookActive === true && isAlive(p.hookPid) && Date.parse(p.deadlineAt) > Date.now() + 250 }));
 }
 
 export function decidePermission(id, decisionId, decision, reason, controllerIdValue) {
@@ -749,8 +745,11 @@ export function decidePermission(id, decisionId, decision, reason, controllerIdV
   if (!/^[0-9a-f-]{36}$/i.test(decisionId)) throw new Error("无效的决定 ID");
   const pending = readJson(path.join(taskDir(id), "pending", `${decisionId}.json`));
   if (!pending) throw new Error("待决操作不存在");
+  if (pending.state !== "awaiting_codex" || pending.hookActive !== true || !isAlive(pending.hookPid) || Date.parse(pending.deadlineAt) <= Date.now() + 250) throw new Error("审批已转人工或原钩子失效，不能补写旧批准；先读取该审批记录");
   if (pending.kind === "user" && decision === "allow") throw new Error("该操作必须由用户在 Claude 窗口批准");
   if (!["allow", "deny"].includes(decision)) throw new Error("decision 只能是 allow 或 deny");
+  const existing = readJson(path.join(taskDir(id), "decisions", `${decisionId}.json`));
+  if (existing) { if (existing.decision !== decision) throw new Error("同一审批不能改写决定"); return { id: decisionId, decision, duplicate: true }; }
   writeJson(path.join(taskDir(id), "decisions", `${decisionId}.json`), { id: decisionId, decision, reason: reason || null });
   appendEvent(id, { type: "permission_answer_written", decisionId, decision });
   return { id: decisionId, decision };

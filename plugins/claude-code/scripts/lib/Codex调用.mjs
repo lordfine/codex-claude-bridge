@@ -1,9 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync, spawn } from "node:child_process";
+import { executable } from "./平台适配.mjs";
 
 export function codexCommand() {
-  if (process.platform !== "win32") return { command: "codex", prefix: [] };
+  if (process.platform !== "win32") return { command: executable("codex"), prefix: [] };
   const source = execFileSync("powershell.exe", ["-NoProfile", "-Command",
     "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); (Get-Command codex -ErrorAction Stop).Source"],
     { encoding: "utf8", windowsHide: true, timeout: 5000 }).trim();
@@ -30,10 +31,11 @@ export function stopOwnedCodex(child) {
 
 export async function runCodex(args, prompt, options = {}) {
   const child = spawnCodex(args, options);
-  let buffer = "", threadId = null, message = "", usage = null, failed = false;
+  let buffer = "", threadId = null, message = "", usage = null, failed = false, timedOut = false, lastEventType = null;
   const completed = new Promise((resolve, reject) => {
     child.on("error", reject);
-    child.on("close", (code, signal) => resolve({ code, signal, threadId, message, usage, failed }));
+    child.on("close", (code, signal) => resolve({ code, signal, threadId, message, usage, failed,
+      diagnostic: { started: Boolean(child.pid), exitCode: code, signal, timedOut, protocolFailed: failed, lastEventType } }));
   });
   child.stdout.setEncoding("utf8");
   child.stdin.on("error", () => { failed = true; stopOwnedCodex(child); });
@@ -44,6 +46,7 @@ export async function runCodex(args, prompt, options = {}) {
     while ((newline = buffer.indexOf("\n")) >= 0) {
       const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1);
       let event; try { event = JSON.parse(line); } catch { continue; }
+      lastEventType = event.type || null;
       if (event.type === "thread.started") threadId = event.thread_id;
       if (event.type === "item.completed" && event.item?.type === "agent_message") message = event.item.text;
       if (event.type === "turn.completed") usage = event.usage;
@@ -54,6 +57,6 @@ export async function runCodex(args, prompt, options = {}) {
   });
   try { options.onSpawn?.(child); } catch (error) { stopOwnedCodex(child); throw error; }
   child.stdin.end(prompt);
-  const timer = setTimeout(() => stopOwnedCodex(child), options.timeoutMs || 120000);
+  const timer = setTimeout(() => { timedOut = true; stopOwnedCodex(child); }, options.timeoutMs || 120000);
   try { return await completed; } finally { clearTimeout(timer); stopOwnedCodex(child); }
 }

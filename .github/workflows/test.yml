@@ -10,7 +10,7 @@ jobs:
   test:
     strategy:
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        os: [windows-latest, ubuntu-latest, macos-15, macos-15-intel]
         node: [22, 24]
     runs-on: ${{ matrix.os }}
     steps:
@@ -20,3 +20,4 @@ jobs:
           node-version: ${{ matrix.node }}
       - run: npm ci
       - run: npm test
+      - run: node scripts/验证平台终端.mjs

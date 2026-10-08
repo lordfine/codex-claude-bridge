@@ -117,7 +117,7 @@ test("恢复中断指令时使原权限请求失效并保留审计事件", () =>
   assert.equal(state.readTask(id).state, "queued");
   assert.equal(state.readTask(id).recoveryInterrupted.commandId, commandId);
   assert.equal(state.readTask(id).originalPrompt, "原始指令");
-  assert.equal(fs.existsSync(pendingFile), false);
+  assert.equal(state.readJson(pendingFile).state, "invalidated");
   assert.ok(state.readEvents(id, 0, 20).events.some((event) => event.type === "permission_invalidated"));
   assert.throws(() => service.decidePermission(id, decisionId, "allow", "", controller), /会话已暂停或退出/);
 });
@@ -257,7 +257,7 @@ test("Codex 未响应时权限钩子不输出自动批准", async () => {
   const id = crypto.randomUUID();
   const cwd = path.join(root, "失联测试仓库");
   fs.mkdirSync(cwd);
-  state.writeTask({ id, cwd, kind: "implementation", sessionId: crypto.randomUUID() });
+  state.writeTask({ id, cwd, controllerId: "审批超时测试", kind: "implementation", sessionId: crypto.randomUUID() });
   const child = spawn(process.execPath, [path.resolve("plugins/claude-code/scripts/managed-hook.mjs")], {
     env: { ...process.env, CC_PLUGIN_CODEX_TASK_ID: id, CC_PLUGIN_CODEX_PERMISSION_WAIT_MS: "200" },
     stdio: ["pipe", "pipe", "pipe"]
@@ -270,4 +270,6 @@ test("Codex 未响应时权限钩子不输出自动批准", async () => {
   assert.equal(exitCode, 0);
   assert.equal(output, "");
   assert.ok(state.readEvents(id, 0, 20).events.some((event) => event.type === "permission_to_human"));
+  const records = service.pendingPermissions(id, state.readTask(id).controllerId);
+  assert.equal(records[0].state, "awaiting_human"); assert.equal(records[0].actionable, false);
 });

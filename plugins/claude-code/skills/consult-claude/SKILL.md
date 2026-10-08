@@ -25,6 +25,8 @@ Codex 负责目标、范围、阶段决策和最终验收；Claude 负责定位�
 
 ## 派发与继续
 
+会话默认不限执行时长。用户未指定时不要自行传入 `max_minutes`；只有用户指定才设置，`0` 表示不限时；明确审批、空闲与人类挂起暂停计时。
+
 普通托管用 `delegate_workflow` 保存目标、派发、审查、最多两轮返工与验收合并。Orca 用 `delegate_orca`，保持原目录与精确 Claude UUID，接入前确认人类轮和队列结束。Orca 接入不等于自动合并或统一执行预算。
 
 原生派发需要阶段记录时传 `process_docs=true`；Orca 发送默认准备 `.协作记录/<任务标识>/`，也可用 `delegate_coordination(prepare)`。交付用短报告、实际检查与稳定快照；取交付用 `handoff`。只在需要时读 [任务与交付](./references/任务与交付.md)。
@@ -34,6 +36,10 @@ Codex 负责目标、范围、阶段决策和最终验收；Claude 负责定位�
 续接时只处理提示指定的任务与后端，读短状态、当前交付与必要新增正文，安排下一阶段后退出。用户暂停则保持暂停。回执不明停自动派发并核对原请求，不换请求 ID 重发。详细顺序见 [验收与续接](./references/验收与续接.md)。
 
 ## 读取与交接
+
+优先用 `delegate_overview` 一次看短进度，保留各执行线的会话、工作区与交付版本。不要把 Codex 手工修改描述成原 Claude 窗口推进。收到重复观察的结束提示就结束模型轮；用户主动查询才使用 `force=true`。保留历史与实时读取入口。
+
+审批默认等主控五分钟、可调整；超时记录转人工仍可查询。只有 `actionable=true` 的请求可以决定，失效钩子不补写批准。续接暂停先用 `delegate_wake(inspect)` 看分类诊断，不盲目重发。
 
 历史与实时读取能力保留。`delegate_history` 按原目录＋精确 UUID 只读分页，无须接管；默认不读全文或工具日志。Orca `status` 默认不含正文，用 `after_revision` 去重；正文用 `transcript/history` 的字节／字符游标，屏幕用独立 `screen_revision`。无变化立即结束这次处理。
 

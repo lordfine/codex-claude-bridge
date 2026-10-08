@@ -6,7 +6,7 @@
 
 **把一个需求，变成有分工、有进度、有验收的 AI 协作任务。**
 
-[![版本](https://img.shields.io/badge/版本-v0.18.0-303c3b)](https://github.com/lordfine/codex-claude-bridge/releases/latest)
+[![版本](https://img.shields.io/badge/版本-v0.19.0-303c3b)](https://github.com/lordfine/codex-claude-bridge/releases/latest)
 [![检查](https://github.com/lordfine/codex-claude-bridge/actions/workflows/test.yml/badge.svg)](https://github.com/lordfine/codex-claude-bridge/actions/workflows/test.yml)
 [![许可](https://img.shields.io/github/license/lordfine/codex-claude-bridge?label=许可)](./LICENSE)
 
@@ -66,11 +66,11 @@
 | 接回已有会话 | 原 Claude 进程退出后续接 | 空闲时直接接入，无须退出原进程 |
 | 独立工作树、独立审查、返工、验收合并 | 已实现 | 尚未接入；在给定工作区执行 |
 | 默认并发 3、最高 10，超额排队 | 已实现，按 Codex 主控任务计算 | 尚未接入统一配额 |
-| 时间与主会话轮数预算 | 已实现，可调整 | 尚未接入 |
+| 时间与主会话轮数预算 | 默认不限时，可为单个会话设时长上限；轮数可调整 | 尚未接入 |
 | Claude 完成后触发 Codex CLI 续接 | 已实现 | 已实现，本地观察后按事件续接 |
 | 人类操作与权限处理 | 插件门禁与 `/交还` | 保持原会话权限与 Orca 钩子 |
 
-Windows 是优先实机验证平台。当前提供 24 个公开工具和 106 项回归检查；原打开 Codex 桌面窗口即时刷新、长期并发和远程 Orca 等场景仍需验证。[验证口径与限制](./docs/功能与限制.md)
+支持 Windows 与 macOS（Apple Silicon／Intel），同一源码包。当前提供25个工具；CI覆盖四个平台标签与Node 22／24，并运行真实PTY探针。Mac GUI、首次授权及你的模型需实机确认。[Mac安装与验收](./docs/Mac安装与验收.md) · [验证范围](./docs/功能与限制.md)
 
 ## 让 Codex 把用量花在判断上
 
@@ -88,9 +88,13 @@ Windows 是优先实机验证平台。当前提供 24 个公开工具和 106 项
 
 档位控制介入边界，不能保证账单下降；上下文、缓存、全局技能与返工也影响用量。[协作档位与用量](./docs/协作档位与用量.md)
 
+## 0.19 的协作修复
+
+统一短进度摘要一次区分原生／Orca、会话、目录与交付快照。重复观察返回结束提示，用户主动查询仍可读取实时细节。审批升级记录保留，续接失败可查分类诊断；默认不限时，用户主动设置的执行预算排除明确等待。[本次验证](./docs/版本验证-0.19.0.md)
+
 ## 怎么开始？
 
-先准备：**Codex、Claude Code、Node.js 20+、Git**。本文安装命令使用 Codex CLI；Windows 普通终端窗口还需要 **Windows Terminal、PowerShell 7**。Claude Code 必须已能使用你的当前登录或模型配置工作。
+先准备：**Codex、Claude Code、Node.js 20+、Git**。本文安装命令使用 Codex CLI；Windows 普通终端窗口还需要 **Windows Terminal、PowerShell 7**，Mac 使用系统 Terminal。Claude Code 必须已能使用你的当前登录或模型配置工作。
 
 ```powershell
 git clone https://github.com/lordfine/codex-claude-bridge.git
@@ -129,6 +133,7 @@ codex plugin add claude-code@codex-claude-bridge
 | [最佳实践](./docs/最佳实践.md) | 任务分派、并行、模型、交接与验收 |
 | [功能与限制](./docs/功能与限制.md) | 核对已实现、已验证与尚未接入的能力 |
 | [协作档位与用量](./docs/协作档位与用量.md) | 切档、短交付、历史读取与用量口径 |
+| [Mac安装与验收](./docs/Mac安装与验收.md) | Mac环境、Terminal授权及实机检查 |
 | [开发指南](./docs/开发指南.md) | 修改代码、运行检查或发布版本 |
 
 问题与建议通过 [Issues](https://github.com/lordfine/codex-claude-bridge/issues) 提交，附版本与脱敏复现步骤。
