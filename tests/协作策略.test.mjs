@@ -120,10 +120,11 @@ test("无模型观察器完成一次事件，重复观察不重复队列和正�
   assert.ok(!JSON.stringify(queue.pendingWakeEvents(f.folder)).includes("交付"));
 });
 
-test("忙碌界面不算可靠交付，人类接管会抑制自动派发", async () => {
+test("忙碌和未知草稿不算可靠交付，草稿待办不冒充人类接管", async () => {
   const f = fixture(); await watcher.observeLocalRecords(f.controllerId, { observe: () => ({ logged: true, completed: true, text: "交付" }), probe: async () => ({ busy: true, draft: true }) });
-  assert.equal(queue.pendingWakeEvents(f.folder).length, 0);
-  const updated = state.readJson(path.join(state.MANAGED_ROOT, "orca", "会话", `${f.id}.json`)); assert.equal(updated.owner, "human");
+  assert.equal(queue.pendingWakeEvents(f.folder).some((e) => e.type === "instruction_completed"), false);
+  assert.equal(queue.pendingWakeEvents(f.folder).some((e) => e.type === "draft_blocked"), true);
+  const updated = state.readJson(path.join(state.MANAGED_ROOT, "orca", "会话", `${f.id}.json`)); assert.notEqual(updated.owner, "human"); assert.equal(updated.terminalBlocker.source, "unknown");
 });
 
 test("轻量轮真实 low 参数，深度轮恢复显式等级", () => {

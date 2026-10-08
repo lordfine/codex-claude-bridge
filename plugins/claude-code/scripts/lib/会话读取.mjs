@@ -20,6 +20,18 @@ export function redactText(text) {
 }
 const hash = (value) => crypto.createHash("sha256").update(value).digest("hex");
 const normalizedText = (text) => String(text || "").replace(/\r\n/g, "\n").trim();
+const systemTaskOrigin = (entry) => entry.origin?.kind === "task-notification" && entry.promptSource === "system" && entry.turnOrigin === "task_notification";
+export function taskNotification(entry) {
+  const note = entry.attachment || entry.data;
+  if (note?.type === "task_notification") return note;
+  if (!systemTaskOrigin(entry)) return null;
+  const text = normalizedText(entryText(entry));
+  if (!/^<task-notification(?:\s[^<>]*)?>[\s\S]*<\/task-notification>$/.test(text)) return null;
+  // 只读通知头，不把 result 中的正文当元数据或新指令。
+  const header = text.split(/<result(?:\s[^<>]*)?>/)[0];
+  const field = (name) => header.match(new RegExp(`<${name}>([^<>\\r\\n]{1,160})</${name}>`))?.[1]?.trim();
+  return { type: "task_notification", taskId: field("task-id"), toolUseId: field("tool-use-id"), status: field("status") };
+}
 export function entryText(entry, tools = false) {
   const content = entry.message?.content;
   if (typeof content === "string") return content;
@@ -34,6 +46,7 @@ export function messageOrigin(entry) {
   const content = entry.message?.content;
   if (Array.isArray(content) && content.some((p) => p.type === "tool_result")) return "tool_result";
   if ((entry.attachment || entry.data)?.type === "task_notification") return "task_notification";
+  if (systemTaskOrigin(entry)) return "task_notification";
   const text = normalizedText(entryText(entry));
   // 兼容 Claude 的完整系统投递包装；普通聊天中引用标签不按通知处理。
   if (/^Another Claude session sent a message:\s*<teammate-message\s+teammate_id="[^"<>\r\n]+"(?:\s+[^<>]*)?>[\s\S]*<\/teammate-message>\s*$/.test(text)) return "agent_notification";
@@ -89,18 +102,24 @@ export function findSession(sessionId, cwd) {
 export function observeInstruction(sessionId, cwd, instruction, saved = {}) {
   let file; try { file = findSession(sessionId, cwd); } catch { return { ...saved, logged: false, completed: false, available: false, changed: Boolean(saved.cursor), text: saved.text || "" }; }
   const result = { logged: false, completed: false, failed: false, ambiguous: false, gap: false, text: "", ...saved, available: true };
+  result.notificationBoundaryRepaired = false;
   const cursor = result.cursor || { offset: instruction.baseline || 0 };
   const scan = scanSession(file, cursor, { visit: (e, position) => {
-    const notification = e.attachment || e.data;
+    const notification = taskNotification(e);
     if (e.sessionId?.toLowerCase() !== sessionId.toLowerCase() || e.isSidechain || e.isMeta && notification?.type !== "task_notification" || e.cwd && normalizedDirectory(e.cwd) !== normalizedDirectory(cwd)) return;
     if (result.logged && notification?.type === "task_notification" && ["completed", "failed", "cancelled", "stopped"].includes(notification.status)) {
       const taskId = notification.taskId || notification.task_id;
-      for (const [key, job] of Object.entries(result.background || {})) if (job.taskId === taskId || key === taskId) delete result.background[key];
+      for (const [key, job] of Object.entries(result.background || {})) if (job.taskId === taskId || key === taskId || key === notification.toolUseId) delete result.background[key];
     }
     if (e.type === "user") {
       const content = e.message?.content;
       const origin = messageOrigin(e);
-      if (["task_notification", "agent_notification"].includes(origin)) { result.notificationCount = (result.notificationCount || 0) + 1; return; }
+      if (["task_notification", "agent_notification"].includes(origin)) {
+        if (result.nextUserObserved && position.start === result.humanBoundary?.offset && (!result.humanInputEvidence?.uuid || result.humanInputEvidence.uuid === e.uuid)) {
+          result.nextUserObserved = false; result.ambiguous = false; result.humanInputEvidence = null; result.humanBoundary = null; result.notificationBoundaryRepaired = true;
+        }
+        result.notificationCount = (result.notificationCount || 0) + 1; return;
+      }
       if (origin !== "tool_result") {
         const text = normalizedText(entryText(e));
         if (!result.logged && (instruction.marker ? text.includes(instruction.marker) : text === normalizedText(instruction.prompt))) {
@@ -155,13 +174,18 @@ export function observeHumanActivity(sessionId, cwd, saved = {}) {
   const file = findSession(sessionId, cwd), result = { userCount: 0, mainTurnEnded: false, background: {}, ...saved };
   result.background = { ...result.background };
   const scan = scanSession(file, result.cursor || {}, { visit: (e, position) => {
-    const note = e.attachment || e.data;
+    const note = taskNotification(e);
     if (e.sessionId?.toLowerCase() !== sessionId.toLowerCase() || e.isSidechain || e.isMeta && note?.type !== "task_notification" || e.cwd && normalizedDirectory(e.cwd) !== normalizedDirectory(cwd)) return;
     const origin = messageOrigin(e);
+    const text = normalizedText(entryText(e)), localSource = e.userType === "external" && e.entrypoint === "cli";
+    if (result.lastUserCommand && e.type === "user" && localSource && e.parentUuid === result.lastUserUuid && /^<local-command-stdout>[\s\S]*<\/local-command-stdout>$/.test(text)) {
+      result.mainTurnEnded = true; result.lastUserCommand = null; result.localCommandCompletedAt = e.timestamp || null; return;
+    }
     if (origin === "human_input") {
       result.userCount++; result.lastUserUuid = e.uuid || hash(`${position.start}`); result.lastUserAt = e.timestamp || null;
       result.lastUserCursor = { offset: position.start, generation: position.generation }; result.mainTurnEnded = false;
       result.firstUserCursor ||= result.lastUserCursor;
+      result.lastUserCommand = localSource ? text.match(/^<command-name>\/([a-z][a-z0-9-]{0,50})<\/command-name>\s*<command-message>[\s\S]*?<\/command-message>\s*<command-args>[\s\S]*?<\/command-args>$/)?.[1] || null : null;
     }
     if (result.userCount && e.type === "assistant") {
       const parts = Array.isArray(e.message?.content) ? e.message.content : [];
@@ -177,7 +201,7 @@ export function observeHumanActivity(sessionId, cwd, saved = {}) {
       else if (e.toolUseResult?.backgroundTaskId || e.toolUseResult?.taskId) result.background[p.tool_use_id].taskId = e.toolUseResult.backgroundTaskId || e.toolUseResult.taskId;
     }
     if (note?.type === "task_notification" && ["completed", "failed", "cancelled", "stopped"].includes(note.status)) for (const [key, job] of Object.entries(result.background)) {
-      if (key === (note.taskId || note.task_id) || job.taskId === (note.taskId || note.task_id)) delete result.background[key];
+      if (key === (note.taskId || note.task_id) || job.taskId === (note.taskId || note.task_id) || key === note.toolUseId) delete result.background[key];
     }
   } });
   return { ...result, cursor: scan.cursor, hasMore: scan.hasMore, awaitingData: scan.awaitingData, changed: scan.changed, gap: result.gap || scan.gap,

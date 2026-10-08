@@ -1,6 +1,6 @@
 {
   "name": "codex-claude-bridge",
-  "version": "0.19.1",
+  "version": "0.19.2",
   "private": true,
   "type": "module",
   "description": "Codex 指挥 Claude Code 完成可恢复的实现、审查、返工与验收流程。",

@@ -34,6 +34,31 @@ function fixture() {
   return { root, cwd, session, calls, t, state, api, attach };
 }
 
+test("Orca重启后显式重绑定保留接入记录与原指令，既不重开也不重发", async () => {
+  const f = fixture(), first = await f.attach();
+  f.t.handle = "term_重启后"; f.t.incarnationId = "实例二"; f.state.runtime = "运行时二";
+  const rebound = await f.api({ action: "rebind", id: first.id, terminal_id: f.t.handle, controller_id: "主控一", request_id: "重绑定一", idle_confirmed: true });
+  assert.equal(rebound.id, first.id); assert.equal(rebound.terminalId, "term_重启后"); assert.equal(rebound.binding.state, "verified"); assert.equal(f.state.launches, 0);
+  assert.equal(f.calls.some((c) => c[1] === "close"), false);
+});
+test("重接同一UUID保留记录编号，状态发现失效时返回恢复指引", async () => {
+  const f = fixture(), first = await f.attach(); f.t.handle = "term_新句柄"; f.t.incarnationId = "新实例"; f.state.runtime = "新运行时";
+  const before = f.calls.length, stale = await f.api({ action: "status", id: first.id, controller_id: "主控一" });
+  assert.equal(stale.binding.state, "stale"); assert.equal(f.calls.slice(before).some((c) => c[1] === "send"), false);
+  const next = await f.attach({ request_id: "重新接入一" }); assert.equal(next.id, first.id); assert.equal(next.binding.rebound, true);
+});
+test("重绑定拒绝不同UUID；有草稿的状态面板不发送Esc", async () => {
+  for (const mode of ["wrong", "draft"]) {
+    const f = fixture(), first = await f.attach(); f.t.handle = "term_替代"; f.t.incarnationId = "新实例"; f.state.runtime = "新运行时";
+    if (mode === "wrong") f.state.session = crypto.randomUUID();
+    else { f.state.screen = [`Session ID: ${f.session}`, `cwd: ${f.cwd}`]; f.state.draft = "尚未发送，来源未知"; }
+    const before = f.calls.length;
+    await assert.rejects(f.api({ action: "rebind", id: first.id, terminal_id: f.t.handle, controller_id: "主控一", request_id: "重绑定一", idle_confirmed: true }), mode === "wrong" ? /身份不匹配/ : /来源尚未确认/);
+    if (mode === "draft") assert.equal(f.calls.slice(before).some((c) => c[1] === "send"), false);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(f.root, "会话", `${first.id}.json`))).terminalId, first.terminalId);
+  }
+});
+
 test("状态身份只提取 UUID 与目录，忽略连接配置", () => {
   assert.deepEqual(statusIdentity(["Session ID: 18ae835b-fcbb-4a6d-b6de-f73f075adc73", "cwd: D:\\项目", "Auth token: 私密内容"]),
     { sessionId: "18ae835b-fcbb-4a6d-b6de-f73f075adc73", cwd: "D:\\项目" });
