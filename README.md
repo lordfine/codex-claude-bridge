@@ -6,7 +6,7 @@
 
 **把一个需求，变成有分工、有进度、有验收的 AI 协作任务。**
 
-[![版本](https://img.shields.io/badge/版本-v0.19.2-303c3b)](https://github.com/lordfine/codex-claude-bridge/releases/latest)
+[![版本](https://img.shields.io/badge/版本-v0.20.0-303c3b)](https://github.com/lordfine/codex-claude-bridge/releases/latest)
 [![检查](https://github.com/lordfine/codex-claude-bridge/actions/workflows/test.yml/badge.svg)](https://github.com/lordfine/codex-claude-bridge/actions/workflows/test.yml)
 [![许可](https://img.shields.io/github/license/lordfine/codex-claude-bridge?label=许可)](./LICENSE)
 
@@ -95,6 +95,8 @@
 **0.19.1：人类插话后继续管理。** Codex 暂停写入并保持观察，人类任务完成后理解新增意图再接续；新增最新调度故障、观察心跳与通知回执诊断，修复 Windows 中文提醒和 Orca 旧输入重复识别。[协同与排障](./docs/续接故障与人类协同.md)
 
 **0.19.2：补齐恢复与阻塞处理。** 独立调度故障可按编号恢复；Orca重启后保留原记录重新绑定；系统任务通知按来源识别，未知草稿明确提醒处理。[操作说明](./docs/续接故障与人类协同.md)
+
+**0.20.0：完成事件实测与输入分层。** UI composer不再当作终端输入；提交状态由真实日志核验，低频只在整批或重大异常介入。新隔离会话已取得Claude完成→Codex实际复核的回执；原业务会话与共享Orca全应用重启仍单独待验。[验证记录](./docs/版本验证-0.20.0.md)
 
 ## 怎么开始？
 

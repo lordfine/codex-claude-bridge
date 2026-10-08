@@ -19,6 +19,7 @@ import { TOOLS } from "./lib/工具定义.mjs";
 import { coordinationControl } from "./lib/协作策略.mjs";
 import { readHistory } from "./lib/会话读取.mjs";
 import { overview, compactObservation } from "./lib/进度摘要.mjs";
+import { statusResponse } from "./lib/状态响应.mjs";
 
 const SERVER_NAME = "claude-code";
 const SERVER_VERSION = JSON.parse(fs.readFileSync(new URL("../.codex-plugin/plugin.json", import.meta.url), "utf8")).version;
@@ -46,7 +47,8 @@ async function handleManagedReview(args) {
 }
 
 
-async function handleSetup(args) { return managedResult(checkManagedReadiness({ deep: Boolean(args?.deep) })); }
+async function handleSetup(args) { return managedResult({ ...checkManagedReadiness({ deep: Boolean(args?.deep) }), service: { version: SERVER_VERSION, pid: process.pid,
+  wakeActions: TOOLS.find((t) => t.name === "delegate_wake").inputSchema.properties.action.enum, orcaActions: TOOLS.find((t) => t.name === "delegate_orca").inputSchema.properties.action.enum } }); }
 
 async function handleMessage(message) {
   const { id, method, params } = message ?? {};
@@ -67,9 +69,9 @@ async function handleMessage(message) {
         setup: handleSetup,
         delegate_create: handleManagedCreate,
         delegate_list: (args) => managedResult(listManagedTasks(args.controller_id, args.include_archived)),
-        delegate_status: (args) => managedResult(managedStatus(args.task_id, args.controller_id, args.cursor, args.limit)),
+        delegate_status: (args) => managedResult(statusResponse(managedStatus(args.task_id, args.controller_id, args.cursor, args.limit))),
         delegate_transcript: (args) => managedResult(managedTranscript(args.task_id, args.controller_id, args.max_chars, args.cursor)),
-        delegate_wait: async (args) => managedResult(await waitManaged(args.task_id, args.cursor, args.seconds, args.controller_id)),
+        delegate_wait: async (args) => managedResult(statusResponse(await waitManaged(args.task_id, args.cursor, args.seconds, args.controller_id))),
         delegate_send: async (args) => managedResult(await control(args.task_id, { type: "send", prompt: args.prompt }, args.controller_id)),
         delegate_takeover: async (args) => managedResult(await control(args.task_id, { type: "takeover", immediate: args.immediate }, args.controller_id)),
         delegate_permissions: (args) => managedResult(args.decision_id && args.decision

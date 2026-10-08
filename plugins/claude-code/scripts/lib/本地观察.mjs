@@ -8,6 +8,8 @@ import { enqueueWakeEvent, wakeDir, readWakeJson, writeWakeJson } from "./事件
 import { recordSchedulerFault } from "./续接诊断.mjs";
 import { attentionNotice } from "./本地提醒.mjs";
 import { observeHumanActivity } from "./会话读取.mjs";
+import { logActivity } from "./日志活动.mjs";
+import { coordinationConfig } from "./协作策略.mjs";
 
 const hash = (s) => crypto.createHash("sha256").update(s).digest("hex");
 export async function observeLocalRecords(controller, { root = MANAGED_ROOT, observe = readTurn, probe = probeOrcaRecord, now = Date.now() } = {}) {
@@ -18,7 +20,7 @@ export async function observeLocalRecords(controller, { root = MANAGED_ROOT, obs
   for (const [backend, records] of [["orca", orca], ["native", native]]) for (const r of records) {
     const stateFile = path.join(root, "observers", `${backend}-${r.id}.json`), previous = readJson(stateFile) || {};
     if (previous.retryAfter > now) continue;
-    const next = { ...previous };
+    const next = { ...previous, completionCandidate: null };
     try {
     const emit = (type, key, extra = {}) => {
       const eventId = hash(`${backend}:${r.id}:${key}:${type}`);
@@ -36,14 +38,18 @@ export async function observeLocalRecords(controller, { root = MANAGED_ROOT, obs
       try { next.probe = await probe(r); }
       catch (error) { next.probe = { error: error.code || "PROBE_FAILED" }; }
       next.lastProbeAt = now;
+      const blockingInput = Boolean(next.probe.inputPending || next.probe.draft && next.probe.draftKind !== "orca_ui_composer");
       if (next.probe.stale) emit("binding_stale", `${r.runtimeId}:${r.terminalId}:${next.probe.code || "stale"}`);
       if (next.probe.error) emit("recovery_uncertain", `${r.runtimeId}:${r.terminalId}:${next.probe.error}`);
       if (next.probe.needsInput) emit("needs_input", `${r.lastInstruction?.requestId}:${next.probe.revision}`);
-      if (next.probe.draft) emit("draft_blocked", `${r.terminalId}:${next.probe.draftEvidence?.fingerprint || next.probe.revision || "unknown"}`);
-      if (previous.probe?.draft && !next.probe.draft && !next.probe.stale && !next.probe.error) emit("draft_cleared", `${r.terminalId}:${previous.probe.draftEvidence?.fingerprint || "unknown"}`);
+      const ownedEcho = next.probe.draftEvidence?.source === "bridge_submission_echo";
+      if (blockingInput && !ownedEcho) emit("draft_blocked", `${r.terminalId}:${next.probe.draftEvidence?.fingerprint || next.probe.revision || "unknown"}`);
+      const confirmedDraft = previous.probe?.draftEvidence?.source === "bridge_submission_echo" || Boolean(r.draftSubmission && r.lastInstruction && r.draftSubmission.requestId === r.lastInstruction.requestId && Date.now() - Date.parse(r.draftSubmission.at || "") < 30000);
+      if (previous.probe?.draft && previous.probe.draftKind !== "orca_ui_composer" && !next.probe.draft && !next.probe.stale && !next.probe.error && !confirmedDraft) emit("draft_cleared", `${r.terminalId}:${previous.probe.draftEvidence?.fingerprint || "unknown"}`);
       const recordFile = path.join(root, "orca", "会话", `${r.id}.json`), fresh = readJson(recordFile);
       if (fresh?.state === "attached" && fresh.controlRevision === r.controlRevision) {
-        fresh.terminalBlocker = next.probe.stale ? { kind: "binding_stale", code: next.probe.code || "BINDING_STALE" } : next.probe.error ? { kind: "probe_error", code: next.probe.error } : next.probe.draft ? { kind: "draft", ...(next.probe.draftEvidence || { present: true, source: "unknown" }) } : null;
+        fresh.uiDraft = next.probe.uiDraft || null;
+        fresh.terminalBlocker = next.probe.stale ? { kind: "binding_stale", code: next.probe.code || "BINDING_STALE" } : next.probe.error ? { kind: "probe_error", code: next.probe.error } : blockingInput && !ownedEcho ? { kind: "terminal_input", ...(next.probe.draftEvidence || { present: true, source: "unknown" }) } : null;
         writeJson(recordFile, fresh);
       }
     }
@@ -51,17 +57,21 @@ export async function observeLocalRecords(controller, { root = MANAGED_ROOT, obs
       const request = r.lastInstruction.requestId;
       if (next.requestId !== request) { next.requestId = request; next.observation = r.observation || {}; next.handoff = null; }
       const turn = observe(r.sessionId, r.cwd, r.lastInstruction, next.observation || {}); next.observation = turn;
+      try { next.activity = logActivity(r.sessionId, r.cwd, { now, quietMs: (coordinationConfig(controller).stallSeconds || 900) * 1000 }); }
+      catch { next.activity = { available: false, evidence: "main_and_subagent_jsonl" }; }
       if (turn.notificationBoundaryRepaired) next.humanActivity = null;
       completed = turn.completed && !turn.failed && !turn.changed && !turn.gap && !turn.ambiguous;
-      if (turn.backgroundOutstanding && turn.completed) { emit("needs_input", `${request}:background_unverified`); completed = false; }
+      if (turn.backgroundOutstanding) completed = false;
       if (turn.failed) emit("instruction_failed", request);
       if (turn.changed || turn.gap || turn.ambiguous && !turn.nextUserObserved) emit("recovery_uncertain", request);
-      completed = completed && !next.probe?.busy && !next.probe?.stale && !next.probe?.error && !next.probe?.draft;
-      if (completed && !turn.nextUserObserved && r.owner !== "human") emit("instruction_completed", request);
+      completed = completed && !next.probe?.busy && !next.probe?.stale && !next.probe?.error && !next.probe?.inputPending && (!next.probe?.draft || next.probe.draftKind === "orca_ui_composer" || next.probe.draftEvidence?.source === "bridge_submission_echo");
+      next.completionCandidate = completed && !turn.nextUserObserved && r.owner !== "human" ? request : null;
+      if (turn.logged && (!turn.completed || turn.backgroundOutstanding) && r.owner !== "human" && !next.probe?.stale && !next.probe?.draft && next.activity?.suspectedStall) emit("activity_stalled", `${request}:${next.activity.revision}`);
       if (turn.logged) {
         const recordFile = path.join(root, "orca", "会话", `${r.id}.json`), fresh = readJson(recordFile);
         if (fresh?.lastInstruction?.requestId === request && fresh.state === "attached" && fresh.controlRevision === r.controlRevision) {
           fresh.observation = turn; fresh.lastInstruction.state = turn.failed ? "failed" : completed ? "completed" : "logged";
+          fresh.activityEvidence = next.activity;
           if (turn.notificationBoundaryRepaired) fresh.humanActivity = null;
           if (turn.nextUserObserved) fresh.owner = "human";
           fresh.revision = hash(JSON.stringify([fresh.lastInstruction.state, turn.text, turn.ambiguous, turn.changed, turn.available, fresh.owner, fresh.cancelRequested, turn.backgroundOutstanding]));
@@ -86,7 +96,7 @@ export async function observeLocalRecords(controller, { root = MANAGED_ROOT, obs
         }
         if (activity.userCount && activity.completed) {
           const checked = await probe(r); next.probe = checked;
-          if (!checked.busy && !checked.stale && !checked.draft && !checked.error) emit("human_prompt_completed", activity.lastUserUuid, { humanCursor: activity.firstUserCursor });
+          if (!checked.busy && !checked.stale && (!checked.draft || checked.draftKind === "orca_ui_composer") && !checked.inputPending && !checked.error) emit("human_prompt_completed", activity.lastUserUuid, { humanCursor: activity.firstUserCursor });
         }
       }
     }
@@ -106,6 +116,7 @@ export async function observeLocalRecords(controller, { root = MANAGED_ROOT, obs
       next.handoffSignature = signature;
     }
     next.checkedAt = now; next.retryAfter = null;
+    if (backend === "orca" && next.completionCandidate && !next.pendingHandoff) emit("instruction_completed", next.completionCandidate, { level: r.lastInstruction.deliveryLevel || "batch" });
     if (previous.faultId) {
       const file = path.join(wakeDir(root, controller), "faults", `${previous.faultId}.json`), fault = readWakeJson(file);
       if (fault?.state === "active") writeWakeJson(file, { ...fault, state: "observation_recovered", recoveredAt: new Date().toISOString() });
