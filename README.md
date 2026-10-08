@@ -6,7 +6,7 @@
 
 **把一个需求，变成有分工、有进度、有验收的 AI 协作任务。**
 
-[![版本](https://img.shields.io/badge/版本-v0.19.0-303c3b)](https://github.com/lordfine/codex-claude-bridge/releases/latest)
+[![版本](https://img.shields.io/badge/版本-v0.19.1-303c3b)](https://github.com/lordfine/codex-claude-bridge/releases/latest)
 [![检查](https://github.com/lordfine/codex-claude-bridge/actions/workflows/test.yml/badge.svg)](https://github.com/lordfine/codex-claude-bridge/actions/workflows/test.yml)
 [![许可](https://img.shields.io/github/license/lordfine/codex-claude-bridge?label=许可)](./LICENSE)
 
@@ -91,6 +91,8 @@
 ## 0.19 的协作修复
 
 统一短进度摘要一次区分原生／Orca、会话、目录与交付快照。重复观察返回结束提示，用户主动查询仍可读取实时细节。审批升级记录保留，续接失败可查分类诊断；默认不限时，用户主动设置的执行预算排除明确等待。[本次验证](./docs/版本验证-0.19.0.md)
+
+**0.19.1：人类插话后继续管理。** Codex 暂停写入并保持观察，人类任务完成后理解新增意图再接续；新增最新调度故障、观察心跳与通知回执诊断，修复 Windows 中文提醒和 Orca 旧输入重复识别。[协同与排障](./docs/续接故障与人类协同.md)
 
 ## 怎么开始？
 

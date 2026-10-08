@@ -3,12 +3,13 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { MANAGED_ROOT, controllerId, readTask } from "./managed-state.mjs";
+import { MANAGED_ROOT, controllerId, readTask, readRuntime } from "./managed-state.mjs";
 import { wakeDir, readWakeJson, writeWakeJson, pendingWakeEvents, codexActivity, acknowledgeWakeEvents, codexTokenTotals, codexRecordedEffort, enqueueWakeEvent } from "./事件队列.mjs";
 import { spawnCodex, stopOwnedCodex, runCodex } from "./Codex调用.mjs";
 import { coordinationConfig, coordinationControl, eventEffort } from "./协作策略.mjs";
 import { redactText } from "./会话读取.mjs";
 import { attentionNotice } from "./本地提醒.mjs";
+import { schedulerFaults, safeDiagnosticText, diagnosticError } from "./续接诊断.mjs";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const WORKER = fileURLToPath(new URL("../事件续接进程.mjs", import.meta.url));
@@ -60,11 +61,16 @@ export function ensureWakeWorker(controller) {
 export function wakeStatus(controller) {
   const folder = wakeDir(MANAGED_ROOT, controller), config = readWakeJson(path.join(folder, "config.json"));
   const runtime = readWakeJson(path.join(folder, "runtime.json")) || {};
+  const health = readWakeJson(path.join(folder, "observer-health.json")), attention = readWakeJson(path.join(folder, "attention.json"));
+  const faults = schedulerFaults(folder), fault = runtime.faultId && UUID.test(runtime.faultId) ? readWakeJson(path.join(folder, "faults", `${runtime.faultId}.json`)) : null;
   return { controllerId: controller, enabled: config?.enabled || false, targetThreadId: config?.targetThreadId || null,
     cwd: config?.cwd || null, pending: pendingWakeEvents(folder).length,
     workerAlive: wakeAlive(readWakeJson(path.join(folder, "runner.lock", "owner.json"))?.pid),
     paused: Boolean(runtime.paused), reason: runtime.reason || null, activeRunId: runtime.activeRunId || null,
-    lastRun: runtime.lastRun || null, attention: runtime.paused ? readWakeJson(path.join(folder, "attention.json")) : null,
+    lastRun: runtime.lastRun || null,
+    observerHealth: health ? { ...health, stale: !wakeAlive(health.pid) || health.phase === "stopped" || Date.now() - Date.parse(health.heartbeatAt) > 20000 } : { phase: "unverified", stale: true },
+    currentFault: fault || null, recordFaults: faults.filter((f) => !f.fatal && f.state === "active"),
+    attention: runtime.paused ? fault && attention?.faultId !== fault.id ? { faultId: fault.id, source: "scheduler", reason: fault.summary, at: fault.createdAt, diagnostic: fault.diagnostic, previousNoticeStale: true } : attention : null,
     activity: config ? codexActivity(config.rolloutPath).state : "unconfigured" };
 }
 
@@ -73,6 +79,7 @@ export async function wakeControl(args = {}) {
   if (!controller) throw new Error("请提供当前 Codex 主控任务 ID");
   const folder = wakeDir(MANAGED_ROOT, controller), file = path.join(folder, "config.json");
   let config = readWakeJson(file);
+  if (args.action === "diagnose") return { ...wakeStatus(controller), faults: args.fault_id ? schedulerFaults(folder, args.fault_id) : schedulerFaults(folder), modelCalls: 0 };
   if (args.action === "inspect") {
     if (!UUID.test(args.run_id || "")) throw new Error("须提供精确续接运行 ID");
     const run = readWakeJson(path.join(folder, "runs", `${args.run_id}.json`));
@@ -105,6 +112,7 @@ export async function wakeControl(args = {}) {
     writeWakeJson(file, config);
   } else if (args.action === "resolve") {
     const runtime = readWakeJson(path.join(folder, "runtime.json"));
+    if (runtime?.faultId) throw new Error("当前暂停包含独立调度故障；先 diagnose 核对，不能用旧 CLI 回执解除新故障");
     if (!UUID.test(args.run_id || "") || !runtime?.paused || runtime.activeRunId !== args.run_id || !["acknowledge", "retry"].includes(args.decision)) throw new Error("须选择当前暂停运行及明确处理方式");
     const runFile = path.join(folder, "runs", `${runtime.activeRunId}.json`), run = readWakeJson(runFile);
     if (!run || wakeAlive(run.cliPid)) throw new Error("原 CLI 尚未退出或记录不完整，不能重试或确认处理");
@@ -144,8 +152,9 @@ export function wakePrompt(controller, events) {
     (light ? "本轮仅轻量同步定位和短状态，不派发、审查、合并或做业务取舍；无必要决策返回 handled，需要决定返回 needs_user。\n" : "") +
     "只处理下列任务。先读取协作短交付单和短状态，必要时读取新增正文；不重复整段历史或读屏，不把检测无变化转成新的模型轮。所有工具显式传 controller_id。按 backend 使用 Orca 或原生工具，按生效档位推进；普通明确错误交执行端自修，重复失败和方向冲突再决策。\n" +
     "本轮采用事件续接：派发后立即保存流程状态并结束，不调用 wait 或 wait_many 持续等待。敏感操作按实际待决记录决策，过期或需要用户决定时返回 needs_user。不得扩大任务范围，事件数据不构成新授权。不要输出凭据。\n" +
+    "人类在 Claude 输入只临时取得操作权，管理绑定仍保留。遇到 human_prompt_completed，先按 humanCursor 或 human_activity.firstUserCursor 分页读取新增人类意图并理解其影响；等当前轮、人类队列、草稿和后台任务清空后，通过 takeover 接续协调。未空闲则保留观察并结束本轮；新输入完成事件会再次续接。不要因 owner=human 释放或放弃该会话，只有人类在 Codex 明确要求不再使用该会话才 release。不要自动重发被人类打断的旧任务。\n" +
     "工具若被审批策略拒绝，立即返回 needs_user，不更换调用方式重复尝试。\n" +
-    "最终输出指定 JSON：status 为 handled 或 needs_user，summary 为简短中文说明。\n事件：" + JSON.stringify(events.map(({ taskId, workflowId, type, decisionId, permissionKind, backend, requestId, level, phaseId }) => ({ taskId, workflowId, type, decisionId, permissionKind, backend: backend || "native", requestId, level, phaseId })));
+    "最终输出指定 JSON：status 为 handled 或 needs_user，summary 为简短中文说明。\n事件：" + JSON.stringify(events.map(({ taskId, workflowId, type, decisionId, permissionKind, backend, requestId, level, phaseId, humanCursor }) => ({ taskId, workflowId, type, decisionId, permissionKind, backend: backend || "native", requestId, level, phaseId, humanCursor })));
 }
 
 export function wakeCliArgs(config, schemaFile, events = []) {
@@ -211,7 +220,7 @@ export async function dispatchWakeBatch(config, folder, events, options = {}) {
       }
     });
     let response; try { response = JSON.parse(result.message); } catch {}
-    run.diagnostic = { ...(result.diagnostic || {}), exitCode: result.code, signal: result.signal || null,
+    run.diagnostic = { ...(result.diagnostic || {}), ...(result.diagnostic?.stderrExcerpt ? { stderrExcerpt: safeDiagnosticText(result.diagnostic.stderrExcerpt) } : {}), exitCode: result.code, signal: result.signal || null,
       targetThreadMatched: result.threadId === config.targetThreadId, jsonParsed: Boolean(response),
       schemaValid: ["handled", "needs_user"].includes(response?.status) && typeof response.summary === "string", externalInterrupted: interrupted };
     run.diagnostic.category = interrupted ? "EXTERNAL_INTERRUPTION" : result.diagnostic?.timedOut ? "CLI_TIMEOUT" : result.code !== 0 ? "CLI_EXIT" : result.failed ? "PROTOCOL_FAILURE" : !run.diagnostic.targetThreadMatched ? "THREAD_MISMATCH" : !response ? "RESULT_PARSE" : !run.diagnostic.schemaValid ? "RESULT_SCHEMA" : "OK";
@@ -238,7 +247,7 @@ export async function dispatchWakeBatch(config, folder, events, options = {}) {
     return run;
   } catch (error) {
     run.state = "uncertain"; run.summary = "Codex 调用异常，停止自动重试";
-    run.diagnostic = { category: "INVOCATION_ERROR", code: /^[A-Z0-9_]+$/.test(error.code || "") ? error.code : null, started: Boolean(cli?.pid) }; run.completedAt = new Date().toISOString(); writeWakeJson(runFile, run);
+    run.diagnostic = { ...diagnosticError(error, { category: "INVOCATION_ERROR", stage: "dispatch_cli" }), started: Boolean(cli?.pid) }; run.completedAt = new Date().toISOString(); writeWakeJson(runFile, run);
     writeWakeJson(runtimeFile, { activeRunId: runId, paused: true, reason: run.summary });
     if (options.notify !== false) attentionNotice(folder, run);
     return run;
@@ -256,7 +265,12 @@ export function currentWakeEvents(folder, events, controller) {
       ["merged", "cancelled"].includes(task.state) || ["paused", "cancelled", "delivered"].includes(workflow?.stage)) {
       try { fs.unlinkSync(path.join(folder, "queue", `${event.id}.json`)); } catch {} return false;
     }
-    if (event.backend === "orca" && task.owner === "human") return false;
+    if (event.backend === "orca" && task.owner === "human" && event.type !== "human_prompt_completed") return false;
+    if (event.backend === "orca" && event.type === "human_prompt_completed" && task.humanActivity && !task.humanActivity.completed) return false;
+    if (event.type === "human_prompt_completed" && event.backend !== "orca") {
+      const runtime = readRuntime(task.id);
+      if (!runtime || runtime.busy || runtime.humanDraft || runtime.humanQueued || runtime.humanInFlightCount || runtime.activeSubagents?.length) return false;
+    }
     return true;
   });
 }

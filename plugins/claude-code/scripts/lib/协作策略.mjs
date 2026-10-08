@@ -26,7 +26,7 @@ export function coordinationConfig(master) {
 export function effectiveProfile(task) { return task.coordinationProfile || coordinationConfig(task.controllerId).profile; }
 export function shouldWake(task, event) {
   if (URGENT.has(event.type)) return true;
-  if (["instruction_completed", "handback"].includes(event.type)) return true;
+  if (["instruction_completed", "handback", "human_prompt_completed"].includes(event.type)) return true;
   if (event.type !== "stage_delivered") return false;
   if (event.requiresDecision === true) return true;
   return (LEVELS[event.level] || 0) >= PROFILES[effectiveProfile(task)];

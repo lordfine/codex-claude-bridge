@@ -35,7 +35,7 @@ const MANAGED_TOOLS = [
   {
     name: "delegate_orca", description: "管理 Orca 原生 Claude 会话。status 默认短状态，用 after_revision 去重；transcript/history 按正文游标分页，read 的 screen_revision 独立去重屏幕。取消返回请求状态，不能据此声称后台全部停止。通过 delegate_wake 可接入本地事件续接；仍不提供 Orca 自动合并和统一执行预算。",
     inputSchema: { type: "object", properties: {
-      action: { type: "string", enum: ["list", "create", "attach", "send", "status", "read", "wait", "release", "close", "takeover", "cancel", "transcript", "history", "diagnose", "repair_cursor"] },
+      action: { type: "string", enum: ["list", "create", "attach", "send", "status", "read", "wait", "release", "close", "takeover", "cancel", "transcript", "history", "diagnose", "repair_cursor", "human_activity"] },
       controller_id: { type: "string" }, cwd: { type: "string" }, id: { type: "string" },
       session_id: { type: "string" }, terminal_id: { type: "string" }, idle_confirmed: { type: "boolean" },
       request_id: { type: "string" }, title: { type: "string" }, model: { type: "string" }, prompt: { type: "string" },
@@ -169,12 +169,12 @@ const MANAGED_TOOLS = [
     }, required: ["action"], additionalProperties: false }
   },
   {
-    name: "delegate_wake", description: "配置按关键 Claude 事件自动续接指定 Codex CLI 会话。只在 Codex 记录空闲时启动；同主控串行，失败或回执不明暂停。status 不调用模型；disable 停止自动接续；resolve 须核对暂停运行后明确确认或重试。",
+    name: "delegate_wake", description: "按关键 Claude 事件续接 Codex。diagnose 只读当前调度故障、心跳与通知回执；inspect 查看精确CLI运行。启用不等于完整链路正常，失败保持暂停，不自动重放。人类临时操作保留观察，完成后通知主控理解意图。",
     inputSchema: { type: "object", properties: {
-      action: { type: "string", enum: ["configure", "enable", "disable", "status", "resolve", "sync", "inspect"] },
+      action: { type: "string", enum: ["configure", "enable", "disable", "status", "resolve", "sync", "inspect", "diagnose"] },
       task_id: { type: "string" }, backend: { type: "string", enum: ["native", "orca"] }, request_id: { type: "string" },
       controller_id: { type: "string" }, target_thread_id: { type: "string" }, cwd: { type: "string" },
-      quiet_seconds: { type: "integer", minimum: 1, maximum: 30 }, run_id: { type: "string" },
+      quiet_seconds: { type: "integer", minimum: 1, maximum: 30 }, run_id: { type: "string" }, fault_id: { type: "string" },
       decision: { type: "string", enum: ["acknowledge", "retry"] }
     }, required: ["action"], additionalProperties: false }
   }

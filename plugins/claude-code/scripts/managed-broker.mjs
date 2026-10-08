@@ -13,6 +13,7 @@ import { scheduleNext, invalidatePendingPermissions } from "./lib/managed-servic
 import { activeTerminalInput, hasHumanIntervention } from "./lib/managed-input.mjs";
 import { executable, ipcEndpoints, trustConfirmationKey } from "./lib/平台适配.mjs";
 import { executionClock } from "./lib/执行计时.mjs";
+import { findSession } from "./lib/会话读取.mjs";
 
 const id = process.argv[2];
 const task = id && readTask(id);
@@ -56,6 +57,7 @@ let owner = "codex";
 let takeoverPending = false;
 let takeoverImmediate = false;
 let humanInputSeen = false;
+let humanStartCursor = null;
 let humanQueued = 0;
 let humanDraft = false;
 let humanDraftLength = 0;
@@ -220,6 +222,7 @@ const terminalServer = net.createServer((socket) => {
     const text = decoder.write(bytes);
     if (!text || exited) return;
     if (hasHumanIntervention(text)) {
+      if (!humanInputSeen) { try { humanStartCursor = { offset: fs.statSync(findSession(task.sessionId, task.cwd)).size }; } catch { humanStartCursor = null; } }
       owner = "human";
       humanInputSeen = true;
       if (ready) {
@@ -423,7 +426,7 @@ setInterval(() => {
       }
       const finished = inFlightPrompts.shift();
       if (finished?.kind === "human") {
-        appendEvent(id, { type: "human_prompt_completed", promptId: finished.promptId });
+        appendEvent(id, { type: "human_prompt_completed", promptId: finished.promptId, humanCursor: humanStartCursor });
       }
       if (current && (!finished || finished.kind === "codex")) {
         appendEvent(id, { type: "instruction_completed", commandId: current.id });
