@@ -5,7 +5,7 @@ import crypto from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { MANAGED_ROOT, controllerId, readJson, writeJson, resolveModel, listTasks, readRuntime } from "./managed-state.mjs";
-import { observeInstruction, readHistory, diagnoseCursor } from "./会话读取.mjs";
+import { observeInstruction, readHistory, diagnoseCursor, observeHumanActivity } from "./会话读取.mjs";
 import { effectiveProfile, validateProfile, prepareRecordDocuments, deliveryInstruction } from "./协作策略.mjs";
 import { orcaLaunch, executable as resolveExecutable } from "./平台适配.mjs";
 
@@ -89,7 +89,7 @@ export function createOrcaAdapter({ call = orcaCall, root = path.join(MANAGED_RO
   const records = () => { try { return fs.readdirSync(folder).filter((f) => f.endsWith(".json")).map((f) => readJson(path.join(folder, f))).filter(Boolean); } catch { return []; } };
   const summary = (r) => ({ id: r.id, controllerId: r.controllerId, sessionId: r.sessionId, cwd: r.cwd,
     terminalId: r.terminalId, incarnationId: r.incarnationId, runtimeId: r.runtimeId, createdByPlugin: r.createdByPlugin,
-    state: r.state, owner: r.owner || "codex", model: r.model, profile: effectiveProfile(r), revision: r.revision || null, lastInstruction: r.lastInstruction ? { requestId: r.lastInstruction.requestId,
+    state: r.state, owner: r.owner || "codex", management: r.state === "attached" ? "retained" : "released", humanActivity: r.humanActivity || null, model: r.model, profile: effectiveProfile(r), revision: r.revision || null, lastInstruction: r.lastInstruction ? { requestId: r.lastInstruction.requestId,
       state: r.lastInstruction.state, orcaRequestId: r.lastInstruction.orcaRequestId } : null });
 
   async function bound(r) {
@@ -134,8 +134,9 @@ export function createOrcaAdapter({ call = orcaCall, root = path.join(MANAGED_RO
   function updateTurn(r, args = {}) {
     if (!r.lastInstruction) return { ...summary(r), turn: null };
     const turn = observe(r.sessionId, r.cwd, r.lastInstruction, r.observation || {});
-    if (turn.logged && r.lastInstruction.terminalState !== "cancelled") r.lastInstruction.state = turn.completed ? "completed" : "logged";
-    if (turn.failed) r.lastInstruction.state = "failed";
+    if (turn.logged && !["cancelled", "human_handoff"].includes(r.lastInstruction.terminalState)) r.lastInstruction.state = turn.completed ? "completed" : "logged";
+    if (turn.failed && !["cancelled", "human_handoff"].includes(r.lastInstruction.terminalState)) r.lastInstruction.state = "failed";
+    if (turn.nextUserObserved) r.owner = "human";
     r.observation = turn;
     r.revision = crypto.createHash("sha256").update(JSON.stringify([r.lastInstruction.state, turn.text, turn.ambiguous, turn.changed, turn.available, r.owner, r.cancelRequested, turn.backgroundOutstanding])).digest("hex");
     const fresh = readJson(recordPath(r.id));
@@ -179,6 +180,7 @@ export function createOrcaAdapter({ call = orcaCall, root = path.join(MANAGED_RO
           if (active.some((r) => r.sessionId === checked.sessionId)) throw new Error("该 Claude 会话已经被另一条 Orca 接入记录占用");
           const r = { id: crypto.randomUUID(), controllerId: master, ...checked, cwd: args.cwd, terminalId: t.handle,
             incarnationId: t.incarnationId, runtimeId: response._meta.runtimeId, createdByPlugin: false, state: "attached", coordinationProfile: args.profile || null, createdAt: new Date().toISOString() };
+          const file = transcriptFile(r.sessionId); r.managementCursor = { offset: file ? fs.statSync(file).size : 0 };
           writeJson(recordPath(r.id), r); return summary(r);
         }
         throw new Error("没有找到身份吻合且空闲的 Orca Claude 终端；未重启任何会话");
@@ -200,7 +202,14 @@ export function createOrcaAdapter({ call = orcaCall, root = path.join(MANAGED_RO
     if (r.state !== "attached") throw new Error("接入已释放或关闭，须重新接入");
     if (args.action === "release") { r.controlRevision = (r.controlRevision || 0) + 1; r.state = "released"; writeJson(recordPath(r.id), r); return { ...summary(r), terminalKeptAlive: true }; }
     const t = await bound(r);
-    if (args.action === "diagnose") return { ...summary(r), diagnosis: diagnoseCursor(r.sessionId, r.cwd, r.observation), nextAction: "可按证据修复通知边界；真实人类接管仍需显式交还" };
+    if (args.action === "human_activity") {
+      const activity = observeHumanActivity(r.sessionId, r.cwd, r.humanActivity || { cursor: r.observation?.humanBoundary || r.managementCursor || r.observation?.cursor || {} });
+      const fresh = readJson(recordPath(r.id));
+      if (fresh?.controlRevision !== r.controlRevision || fresh?.lastInstruction?.requestId !== r.lastInstruction?.requestId || fresh?.state !== r.state) return { ...summary(fresh), changedDuringObservation: true };
+      r.humanActivity = activity; writeJson(recordPath(r.id), r);
+      return { ...summary(r), management: "retained", humanActivity: activity, message: "人类临时操作期间保留观察；读取新增消息理解意图，不自动释放" };
+    }
+    if (args.action === "diagnose") return { ...summary(r), diagnosis: diagnoseCursor(r.sessionId, r.cwd, r.observation), nextAction: "人类操作保留管理，读取新增意图并等当前轮、队列和草稿结束后接续" };
     if (args.action === "repair_cursor") {
       if (args.idle_confirmed !== true) throw new Error("修复游标前须确认人类当前轮与队列已结束");
       const diagnosis = diagnoseCursor(r.sessionId, r.cwd, r.observation);
@@ -220,6 +229,13 @@ export function createOrcaAdapter({ call = orcaCall, root = path.join(MANAGED_RO
       if (args.idle_confirmed !== true) throw new Error("先确认人类当前轮与队列结束，再交回控制权");
       if (r.cancelRequested && args.stop_confirmed !== true) throw new Error("取消尚未确认覆盖后台工具与子代理；需有停止证据或用户明确确认");
       const checked = await identity(t, r.cwd); if (checked.sessionId !== r.sessionId) throw new Error("会话身份已变化");
+      if (r.observation?.nextUserObserved || r.humanActivity?.userCount) {
+        const activity = observeHumanActivity(r.sessionId, r.cwd, r.humanActivity || { cursor: r.observation?.humanBoundary || r.observation?.cursor || {} });
+        if (!activity.completed || activity.changed || activity.gap) throw new Error("人类当前轮或队列尚未有完整结束证据，保留管理并继续观察");
+        r.humanHandledCursor = activity.cursor; r.managementCursor = activity.cursor; r.humanActivity = null;
+        r.observation = { ...r.observation, cursor: activity.cursor, humanBoundary: null, nextUserObserved: false, ambiguous: false, humanInputEvidence: null, completed: false, background: {}, backgroundOutstanding: false };
+        if (r.lastInstruction) { r.lastInstruction.state = "interrupted_by_human"; r.lastInstruction.terminalState = "human_handoff"; }
+      }
       r.owner = "codex";
       r.controlRevision = (r.controlRevision || 0) + 1;
       if (r.cancelRequested && r.lastInstruction) { r.lastInstruction.state = "cancelled"; r.lastInstruction.terminalState = "cancelled"; }
@@ -255,7 +271,8 @@ export function createOrcaAdapter({ call = orcaCall, root = path.join(MANAGED_RO
     if (r.owner === "human" || r.cancelRequested) throw new Error("会话由人类控制或取消尚未确认，先明确交回控制权");
     if (r.observation?.backgroundOutstanding) throw new Error("主轮结束但后台任务范围尚未确认，不继续派发");
     if (!args.prompt || typeof args.prompt !== "string" || args.prompt.length > 50000 || /^[\s]*\//.test(args.prompt) || /[\u0000-\u0008\u001b]/.test(args.prompt)) throw new Error("须提供普通任务正文；不接受斜杠命令或终端控制字符");
-    if (r.lastInstruction && !["completed", "cancelled"].includes(updateTurn(r).lastInstruction.state)) throw new Error("上一条指令尚未确认完成，先读取并核对，不能重复派发");
+    if (r.lastInstruction && !["completed", "cancelled", "interrupted_by_human"].includes(updateTurn(r).lastInstruction.state)) throw new Error("上一条指令尚未确认完成，先读取并核对，不能重复派发");
+    if (r.owner === "human" || r.observation?.nextUserObserved) throw new Error("发现新增人类输入，保留管理；先理解新增意图并确认空闲后接续");
     const checked = await identity(t, r.cwd);
     if (checked.sessionId !== r.sessionId) throw new Error("Claude 实际会话 ID 已变化，停止发送，须按新 ID 重新接入");
     const file = transcriptFile(r.sessionId);
@@ -263,6 +280,7 @@ export function createOrcaAdapter({ call = orcaCall, root = path.join(MANAGED_RO
     r.controlRevision = (r.controlRevision || 0) + 1;
     r.lastInstruction = { requestId: args.request_id, marker, prompt: args.prompt, state: "pending", baseline: file ? fs.statSync(file).size : 0 };
     r.observation = null;
+    r.humanActivity = null; r.managementCursor = { offset: r.lastInstruction.baseline };
     const docs = args.process_docs === false ? null : prepareRecordDocuments(r, args.prompt);
     const sentPrompt = args.prompt + `\n\n${marker}` + (docs ? deliveryInstruction(r, docs) : "");
     writeJson(recordPath(r.id), r);

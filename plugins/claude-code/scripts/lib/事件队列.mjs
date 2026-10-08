@@ -5,7 +5,7 @@ import { shouldWake } from "./协作策略.mjs";
 
 export const WAKE_EVENTS = new Set(["instruction_completed", "instruction_failed", "StopFailure", "needs_input",
   "permission_pending", "permission_to_human", "process_exit", "recovery_failed", "recovery_exhausted", "session_start_blocked", "handback",
-  "recovery_uncertain", "recovery_interrupted_instruction", "broker_lost_claude_alive", "config_changed", "time_limit_reached", "turn_limit_reached", "stage_delivered", "context_sync", "cancel_uncertain", "direction_changed"]);
+  "recovery_uncertain", "recovery_interrupted_instruction", "broker_lost_claude_alive", "config_changed", "time_limit_reached", "turn_limit_reached", "stage_delivered", "context_sync", "cancel_uncertain", "direction_changed", "human_prompt_completed"]);
 export function wakeDir(root, controller) {
   return path.join(root, "wake", crypto.createHash("sha256").update(String(controller)).digest("hex").slice(0, 32));
 }
@@ -35,7 +35,7 @@ export function enqueueWakeEvent(root, taskId, event) {
   writeWakeJson(file, { id, eventId: event.eventId, taskId, controllerId: task.controllerId,
     backend, requestId: event.requestId || null, level: event.level || null, phaseId: event.phaseId || null, requiresDecision: event.requiresDecision === true,
     workflowId: task.workflowId || null, type: event.type, at: event.at,
-    decisionId: event.decisionId || null, permissionKind: event.kind || null });
+    decisionId: event.decisionId || null, permissionKind: event.kind || null, humanCursor: event.humanCursor || null });
   return true;
 }
 export function pendingWakeEvents(folder) {

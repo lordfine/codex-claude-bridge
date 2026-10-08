@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFileSync, spawn } from "node:child_process";
 import { executable } from "./平台适配.mjs";
+import { safeDiagnosticText } from "./续接诊断.mjs";
 
 export function codexCommand() {
   if (process.platform !== "win32") return { command: executable("codex"), prefix: [] };
@@ -31,15 +32,16 @@ export function stopOwnedCodex(child) {
 
 export async function runCodex(args, prompt, options = {}) {
   const child = spawnCodex(args, options);
-  let buffer = "", threadId = null, message = "", usage = null, failed = false, timedOut = false, lastEventType = null;
+  let buffer = "", threadId = null, message = "", usage = null, failed = false, timedOut = false, lastEventType = null, stderr = "";
   const completed = new Promise((resolve, reject) => {
     child.on("error", reject);
     child.on("close", (code, signal) => resolve({ code, signal, threadId, message, usage, failed,
-      diagnostic: { started: Boolean(child.pid), exitCode: code, signal, timedOut, protocolFailed: failed, lastEventType } }));
+      diagnostic: { started: Boolean(child.pid), exitCode: code, signal, timedOut, protocolFailed: failed, lastEventType, stderrExcerpt: safeDiagnosticText(stderr, 2000) || null } }));
   });
   child.stdout.setEncoding("utf8");
   child.stdin.on("error", () => { failed = true; stopOwnedCodex(child); });
-  child.stderr.on("data", () => {}); // 不把 CLI 的连接配置或认证诊断带入事件摘要。
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (part) => { stderr = (stderr + part).slice(-16000); }); // 只把最终脱敏摘要写入诊断，不落原始日志。
   child.stdout.on("data", (part) => {
     buffer += part;
     let newline;

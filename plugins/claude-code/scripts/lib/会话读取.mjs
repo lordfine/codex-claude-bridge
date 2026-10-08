@@ -90,7 +90,7 @@ export function observeInstruction(sessionId, cwd, instruction, saved = {}) {
   let file; try { file = findSession(sessionId, cwd); } catch { return { ...saved, logged: false, completed: false, available: false, changed: Boolean(saved.cursor), text: saved.text || "" }; }
   const result = { logged: false, completed: false, failed: false, ambiguous: false, gap: false, text: "", ...saved, available: true };
   const cursor = result.cursor || { offset: instruction.baseline || 0 };
-  const scan = scanSession(file, cursor, { visit: (e) => {
+  const scan = scanSession(file, cursor, { visit: (e, position) => {
     const notification = e.attachment || e.data;
     if (e.sessionId?.toLowerCase() !== sessionId.toLowerCase() || e.isSidechain || e.isMeta && notification?.type !== "task_notification" || e.cwd && normalizedDirectory(e.cwd) !== normalizedDirectory(cwd)) return;
     if (result.logged && notification?.type === "task_notification" && ["completed", "failed", "cancelled", "stopped"].includes(notification.status)) {
@@ -109,6 +109,7 @@ export function observeInstruction(sessionId, cwd, instruction, saved = {}) {
           if (!result.completed) result.ambiguous = true;
           result.nextUserObserved = true;
           result.humanInputEvidence = { uuid: e.uuid || null, origin, at: e.timestamp || null };
+          result.humanBoundary = { offset: position.start, generation: position.generation };
           return { stopBefore: true };
         }
       }
@@ -148,6 +149,40 @@ export function diagnoseCursor(sessionId, cwd, observation = {}) {
   const file = findSession(sessionId, cwd); let boundary = null;
   const scan = scanSession(file, observation.cursor || {}, { budget: 65536, visit: (e) => { boundary = { origin: messageOrigin(e), uuid: e.uuid || null, at: e.timestamp || null }; return { stop: true }; } });
   return { boundary, changed: scan.changed, repairable: !scan.changed && ["agent_notification", "task_notification"].includes(boundary?.origin), ownershipChanged: false };
+}
+
+export function observeHumanActivity(sessionId, cwd, saved = {}) {
+  const file = findSession(sessionId, cwd), result = { userCount: 0, mainTurnEnded: false, background: {}, ...saved };
+  result.background = { ...result.background };
+  const scan = scanSession(file, result.cursor || {}, { visit: (e, position) => {
+    const note = e.attachment || e.data;
+    if (e.sessionId?.toLowerCase() !== sessionId.toLowerCase() || e.isSidechain || e.isMeta && note?.type !== "task_notification" || e.cwd && normalizedDirectory(e.cwd) !== normalizedDirectory(cwd)) return;
+    const origin = messageOrigin(e);
+    if (origin === "human_input") {
+      result.userCount++; result.lastUserUuid = e.uuid || hash(`${position.start}`); result.lastUserAt = e.timestamp || null;
+      result.lastUserCursor = { offset: position.start, generation: position.generation }; result.mainTurnEnded = false;
+      result.firstUserCursor ||= result.lastUserCursor;
+    }
+    if (result.userCount && e.type === "assistant") {
+      const parts = Array.isArray(e.message?.content) ? e.message.content : [];
+      if (parts.some((p) => p.type === "tool_use")) result.mainTurnEnded = false;
+      for (const p of parts) if (p.type === "tool_use" && p.input?.run_in_background && p.id) result.background[p.id] = { taskId: p.id };
+      if (!parts.some((p) => p.type === "tool_use") && entryText(e) && e.message?.stop_reason === "end_turn") result.mainTurnEnded = true;
+    }
+    if (result.userCount && origin === "tool_result" && Array.isArray(e.message?.content)) for (const p of e.message.content) {
+      if (p.type !== "tool_result") continue;
+      if (e.toolUseResult?.backgroundTaskId) result.background[p.tool_use_id] ||= { taskId: e.toolUseResult.backgroundTaskId };
+      if (!result.background[p.tool_use_id]) continue;
+      if (p.is_error) delete result.background[p.tool_use_id];
+      else if (e.toolUseResult?.backgroundTaskId || e.toolUseResult?.taskId) result.background[p.tool_use_id].taskId = e.toolUseResult.backgroundTaskId || e.toolUseResult.taskId;
+    }
+    if (note?.type === "task_notification" && ["completed", "failed", "cancelled", "stopped"].includes(note.status)) for (const [key, job] of Object.entries(result.background)) {
+      if (key === (note.taskId || note.task_id) || job.taskId === (note.taskId || note.task_id)) delete result.background[key];
+    }
+  } });
+  return { ...result, cursor: scan.cursor, hasMore: scan.hasMore, awaitingData: scan.awaitingData, changed: scan.changed, gap: result.gap || scan.gap,
+    completed: result.userCount > 0 && result.mainTurnEnded && !scan.hasMore && !scan.awaitingData && !scan.changed && !result.gap && !scan.gap && !Object.keys(result.background).length,
+    revision: hash(JSON.stringify([result.lastUserUuid, result.mainTurnEnded, scan.cursor, result.background])) };
 }
 
 export function readHistory(args = {}) {
