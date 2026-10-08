@@ -4,6 +4,8 @@ import net from "node:net";
 import crypto from "node:crypto";
 import { createRequire } from "node:module";
 import { ipcEndpoints, sessionProcessRunning } from "../plugins/claude-code/scripts/lib/平台适配.mjs";
+import { ensurePtyRuntime } from "../plugins/claude-code/scripts/lib/managed-runtime.mjs";
+ensurePtyRuntime();
 const require = createRequire(import.meta.url), pty = require("node-pty");
 const endpoints = ipcEndpoints(crypto.randomUUID());
 const server = net.createServer((s) => s.end("通信确认"));

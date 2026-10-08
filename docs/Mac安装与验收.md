@@ -35,6 +35,8 @@ codex plugin add claude-code@codex-claude-bridge
 
 ## 可见窗口与 PATH
 
+node-pty 1.1.0 的部分npm包有启动辅助文件缺少执行位的问题，环境准备会在确认依赖目录与文件边界后补齐该文件的用户执行位，不修改二进制内容。[上游问题](https://github.com/microsoft/node-pty/issues/919)
+
 原生托管由后台进程持有 Claude，Terminal 客户端只连接它；关闭客户端不会自动取消后台任务。Node、Claude 和 Codex 路径先解析，不能假定桌面应用与交互 shell 的 PATH 完全一致。
 
 首次需要系统允许相关应用控制 Terminal；拒绝时保留任务并返回打开窗口失败，可以处理授权后重新打开。[Apple 自动化权限说明](https://support.apple.com/guide/mac-help/allow-apps-to-control-other-apps-mchl07817563/mac)
