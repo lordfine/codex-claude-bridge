@@ -1,0 +1,102 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640">
+  <defs>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0H0V40" fill="none" stroke="#E6E2D8" stroke-width="1"/>
+    </pattern>
+  </defs>
+  <rect width="1280" height="640" fill="#F4F1E9"/>
+  <rect width="1280" height="640" fill="url(#grid)" opacity=".48"/>
+  <rect x="0" y="0" width="8" height="640" fill="#D8794D"/>
+  <g transform="translate(58 46) scale(.14)">
+    <rect width="512" height="512" rx="112" fill="#142820"/>
+    <path d="M82 142Q256 15 430 142" fill="none" stroke="#D8794D" stroke-width="19" stroke-linecap="round"/>
+    <circle cx="82" cy="142" r="16" fill="#E7A36E"/>
+    <circle cx="430" cy="142" r="16" fill="#8FB69A"/>
+    <rect x="42" y="145" width="142" height="126" rx="21" fill="#20382E" stroke="#E6E2D6" stroke-width="11"/>
+    <rect x="328" y="145" width="142" height="126" rx="21" fill="#20382E" stroke="#E6E2D6" stroke-width="11"/>
+    <path d="m77 187 24 22-24 22m38 0h30" fill="none" stroke="#E7A36E" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="m362 211 20 20 48-54" fill="none" stroke="#8FB69A" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M82 322H430" fill="none" stroke="#3B5749" stroke-width="12" stroke-linecap="round"/>
+    <path d="M103 306v32m61-20v20m61-32v32m61-20v20m61-32v32m61-20v20" fill="none" stroke="#8FB69A" stroke-width="10" stroke-linecap="round"/>
+    <circle cx="256" cy="322" r="20" fill="#D8794D" stroke="#142820" stroke-width="8"/>
+    <path d="M174 391h164m-153-17-18 17 18 17m142-34 18 17-18 17" fill="none" stroke="#E6E2D6" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+  <text x="149" y="82" fill="#142820" font-family="Arial, Microsoft YaHei, Segoe UI, sans-serif" font-size="23" font-weight="700">Codex × Claude Bridge</text>
+  <text x="150" y="107" fill="#738175" font-family="Arial, Microsoft YaHei, Segoe UI, sans-serif" font-size="11" letter-spacing="1.8">LOCAL-FIRST AI COLLABORATION</text>
+  <text x="62" y="196" fill="#172821" font-family="Microsoft YaHei, Segoe UI, Arial, sans-serif" font-size="43" font-weight="700">把两个 AI 接成</text>
+  <text x="62" y="247" fill="#172821" font-family="Microsoft YaHei, Segoe UI, Arial, sans-serif" font-size="43" font-weight="700">有验收的协作闭环</text>
+  <text x="64" y="291" fill="#637067" font-family="Microsoft YaHei, Segoe UI, Arial, sans-serif" font-size="18">Codex 规划与验收，Claude Code 在独立工作树中实现。</text>
+  <g font-family="Arial, Microsoft YaHei, Segoe UI, sans-serif" font-size="12" font-weight="700" letter-spacing="1.1">
+    <text x="64" y="355" fill="#8A583E">PLAN</text>
+    <path d="M105 350h38m-8-7 8 7-8 7" fill="none" stroke="#C47A51" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="157" y="355" fill="#526A58">IMPLEMENT</text>
+    <path d="M245 350h38m-8-7 8 7-8 7" fill="none" stroke="#78957B" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="297" y="355" fill="#8A583E">REVIEW</text>
+    <path d="M357 350h38m-8-7 8 7-8 7" fill="none" stroke="#C47A51" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="409" y="355" fill="#526A58">ACCEPT</text>
+  </g>
+  <path d="M64 391H558" stroke="#DDD8CC" stroke-width="2"/>
+  <text x="65" y="426" fill="#536359" font-family="Microsoft YaHei, Segoe UI, Arial, sans-serif" font-size="16" font-weight="600">任务分工清晰 · 过程可见 · 结果可审</text>
+  <g font-family="Microsoft YaHei, Segoe UI, Arial, sans-serif" font-size="13" font-weight="600">
+    <rect x="64" y="453" width="122" height="34" rx="17" fill="#E9E5DA"/>
+    <text x="125" y="475" fill="#43574A" text-anchor="middle">普通终端可用</text>
+    <rect x="196" y="453" width="112" height="34" rx="17" fill="#E9E5DA"/>
+    <text x="252" y="475" fill="#43574A" text-anchor="middle">Orca 可选</text>
+    <rect x="318" y="453" width="146" height="34" rx="17" fill="#E9E5DA"/>
+    <text x="391" y="475" fill="#43574A" text-anchor="middle">Windows + macOS</text>
+  </g>
+  <text x="65" y="565" fill="#8D988F" font-family="Arial, Microsoft YaHei, sans-serif" font-size="12" letter-spacing="1.5">CODEX-CLAUDE-BRIDGE · YOU KEEP CONTROL</text>
+  <rect x="604" y="45" width="620" height="550" rx="24" fill="#FBFAF6" stroke="#DCD8CC" stroke-width="2"/>
+  <text x="638" y="83" fill="#8A583E" font-family="Arial, Microsoft YaHei, sans-serif" font-size="12" font-weight="700" letter-spacing="1.8">COLLABORATION LOOP</text>
+  <text x="638" y="112" fill="#28392E" font-family="Microsoft YaHei, Segoe UI, Arial, sans-serif" font-size="18" font-weight="700">角色分工 · 本机通信 · 交付可核对</text>
+  <rect x="638" y="139" width="206" height="142" rx="16" fill="#F2EFE7" stroke="#DCD8CC"/>
+  <circle cx="670" cy="171" r="15" fill="#D8794D"/>
+  <text x="670" y="176" fill="#FFF9EE" font-family="Arial, sans-serif" font-size="13" font-weight="700" text-anchor="middle">C</text>
+  <text x="697" y="176" fill="#26372C" font-family="Arial, sans-serif" font-size="18" font-weight="700">Codex</text>
+  <text x="658" y="211" fill="#68766A" font-family="Microsoft YaHei, Segoe UI, Arial, sans-serif" font-size="13">拆解 · 决策 · 审查 · 验收</text>
+  <path d="M658 234H822m-164 17h104" stroke="#D8D4C9" stroke-width="7" stroke-linecap="round"/>
+  <rect x="984" y="139" width="206" height="142" rx="16" fill="#F2EFE7" stroke="#DCD8CC"/>
+  <circle cx="1016" cy="171" r="15" fill="#6C8B70"/>
+  <text x="1016" y="176" fill="#F9FAF3" font-family="Arial, sans-serif" font-size="13" font-weight="700" text-anchor="middle">C</text>
+  <text x="1043" y="176" fill="#26372C" font-family="Arial, sans-serif" font-size="16" font-weight="700">Claude Code</text>
+  <text x="1004" y="211" fill="#68766A" font-family="Microsoft YaHei, Segoe UI, Arial, sans-serif" font-size="13">实现 · 测试 · 交付</text>
+  <path d="M1004 234H1168m-164 17h108" stroke="#D8D4C9" stroke-width="7" stroke-linecap="round"/>
+  <path d="M848 180H977m-8-8 8 8-8 8" fill="none" stroke="#C47A51" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="912" y="166" fill="#8A583E" font-family="Microsoft YaHei, Segoe UI, Arial, sans-serif" font-size="11" font-weight="700" text-anchor="middle">任务</text>
+  <path d="M977 240H848m8-8-8 8 8 8" fill="none" stroke="#78957B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="912" y="263" fill="#526A58" font-family="Microsoft YaHei, Segoe UI, Arial, sans-serif" font-size="11" font-weight="700" text-anchor="middle">结果与 Diff</text>
+  <path d="M741 291v24m346-24v24M741 315H1087" fill="none" stroke="#C9C7BB" stroke-width="2"/>
+  <circle cx="741" cy="315" r="5" fill="#D8794D"/>
+  <circle cx="1087" cy="315" r="5" fill="#6C8B70"/>
+  <text x="638" y="355" fill="#536359" font-family="Arial, Microsoft YaHei, sans-serif" font-size="12" font-weight="700" letter-spacing="1.4">VERIFIABLE DELIVERY</text>
+  <g>
+    <rect x="638" y="374" width="552" height="42" rx="10" fill="#F2EFE7"/>
+    <circle cx="661" cy="395" r="7" fill="#D8794D"/>
+    <text x="680" y="400" fill="#324338" font-family="Microsoft YaHei, Segoe UI, Arial, sans-serif" font-size="14" font-weight="600">独立工作树</text>
+    <text x="838" y="400" fill="#A4A294" font-family="Arial, sans-serif" font-size="15">→</text>
+    <circle cx="876" cy="395" r="7" fill="#78957B"/>
+    <text x="895" y="400" fill="#324338" font-family="Microsoft YaHei, Segoe UI, Arial, sans-serif" font-size="14" font-weight="600">进度同步</text>
+    <text x="1019" y="400" fill="#A4A294" font-family="Arial, sans-serif" font-size="15">→</text>
+    <circle cx="1057" cy="395" r="7" fill="#D8794D"/>
+    <text x="1076" y="400" fill="#324338" font-family="Microsoft YaHei, Segoe UI, Arial, sans-serif" font-size="14" font-weight="600">审查</text>
+  </g>
+  <g>
+    <rect x="638" y="428" width="552" height="42" rx="10" fill="#F2EFE7"/>
+    <circle cx="661" cy="449" r="7" fill="#78957B"/>
+    <text x="680" y="454" fill="#324338" font-family="Microsoft YaHei, Segoe UI, Arial, sans-serif" font-size="14" font-weight="600">返工闭环</text>
+    <text x="838" y="454" fill="#A4A294" font-family="Arial, sans-serif" font-size="15">→</text>
+    <circle cx="876" cy="449" r="7" fill="#D8794D"/>
+    <text x="895" y="454" fill="#324338" font-family="Microsoft YaHei, Segoe UI, Arial, sans-serif" font-size="14" font-weight="600">人工确认</text>
+    <text x="1019" y="454" fill="#A4A294" font-family="Arial, sans-serif" font-size="15">→</text>
+    <circle cx="1057" cy="449" r="7" fill="#78957B"/>
+    <text x="1076" y="454" fill="#324338" font-family="Microsoft YaHei, Segoe UI, Arial, sans-serif" font-size="14" font-weight="600">合并交付</text>
+  </g>
+  <path d="M638 493H1190" stroke="#DDD8CC" stroke-width="2"/>
+  <text x="639" y="529" fill="#718075" font-family="Microsoft YaHei, Segoe UI, Arial, sans-serif" font-size="13">你的工作区 · 你的模型配置 · 你决定业务取舍</text>
+  <g transform="translate(638 550)">
+    <rect width="88" height="6" rx="3" fill="#D8794D"/>
+    <rect x="96" width="125" height="6" rx="3" fill="#78957B"/>
+    <rect x="229" width="180" height="6" rx="3" fill="#D6CFBD"/>
+    <rect x="417" width="120" height="6" rx="3" fill="#E6E2D8"/>
+  </g>
+</svg>

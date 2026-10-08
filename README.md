@@ -1,4 +1,4 @@
-![Codex 指挥，Claude 执行](./docs/图片/项目封面.png)
+![Codex × Claude Bridge · 有验收的协作闭环](./docs/图片/分享预览.png)
 
 <div align="center">
 
