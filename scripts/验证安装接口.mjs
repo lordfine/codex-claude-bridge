@@ -7,8 +7,12 @@ import { fileURLToPath } from "node:url";
 const plugin = path.resolve(process.argv[2] || "plugins/claude-code");
 const manifest = JSON.parse(fs.readFileSync(path.join(plugin, ".codex-plugin", "plugin.json"), "utf8"));
 const state = fs.mkdtempSync(path.join(os.tmpdir(), "ccpc-installed-check-"));
+const fixture = process.argv.includes("--夹具");
+const fixtureEnvironment = fixture ? { PATH: fileURLToPath(new URL("../tests/fixtures/bin/", import.meta.url)) + path.delimiter + process.env.PATH,
+  CC_PLUGIN_CODEX_SETTINGS: path.join(state, "空配置.json") } : {};
+if (fixture) fs.writeFileSync(fixtureEnvironment.CC_PLUGIN_CODEX_SETTINGS, "{}", "utf8");
 const child = spawn(process.execPath, [path.join(plugin, "scripts", "claude-mcp-server.mjs")], {
-  cwd: plugin, env: { ...process.env, CC_PLUGIN_CODEX_MANAGED_DIR: state, CODEX_THREAD_ID: "安装接口验证" },
+  cwd: plugin, env: { ...process.env, ...fixtureEnvironment, CC_PLUGIN_CODEX_MANAGED_DIR: state, CODEX_THREAD_ID: "安装接口验证" },
   stdio: ["pipe", "pipe", "pipe"], windowsHide: true
 });
 let sequence = 0, buffer = "", stderr = "";
