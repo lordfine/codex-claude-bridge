@@ -25,6 +25,36 @@ function fixture(enabled = true) {
   queue.writeWakeJson(path.join(folder, "config.json"), config);
   return { id, controller, folder, config };
 }
+
+test("初始化写入器占用不暂停、不确认交付，退避后同批事件成功处理", async () => {
+  const f = fixture(); state.appendEvent(f.id, { type: "instruction_completed" });
+  const pending = queue.pendingWakeEvents(f.folder);
+  const busy = async () => ({ code: 1, diagnostic: { stderrExcerpt: `failed to initialize thread persistence: thread-store conflict: thread ${f.config.targetThreadId} already has an active writer` } });
+  const first = await wake.dispatchWakeBatch(f.config, f.folder, pending, { runCodex: busy, notify: false });
+  assert.equal(first.state, "deferred_busy"); assert.equal(first.diagnostic.executionStarted, false);
+  assert.equal(queue.pendingWakeEvents(f.folder).length, 1);
+  let runtime = queue.readWakeJson(path.join(f.folder, "runtime.json"));
+  assert.equal(runtime.paused, false); assert.equal(runtime.activeRunId, null); assert.equal(runtime.busyRetries, 1);
+  await wake.dispatchWakeBatch(f.config, f.folder, pending, { runCodex: busy, notify: false });
+  runtime = queue.readWakeJson(path.join(f.folder, "runtime.json")); assert.equal(runtime.busyRetries, 2);
+  const done = await wake.dispatchWakeBatch(f.config, f.folder, pending, { runCodex: async () => ({ code: 0, threadId: f.config.targetThreadId, message: JSON.stringify({ status: "handled", summary: "已验收" }) }), notify: false });
+  assert.equal(done.state, "handled"); assert.equal(queue.pendingWakeEvents(f.folder).length, 0);
+});
+test("出现执行事件后即使stderr含占用字样也禁止自动重试", async () => {
+  const f = fixture(); state.appendEvent(f.id, { type: "instruction_completed" });
+  const result = await wake.dispatchWakeBatch(f.config, f.folder, queue.pendingWakeEvents(f.folder), { runCodex: async (a, p, o) => {
+    o.onEvent({ type: "item.completed", item: { type: "reasoning" } });
+    return { code: 1, diagnostic: { stderrExcerpt: `failed to initialize thread persistence: thread-store conflict: thread ${f.config.targetThreadId} already has an active writer` } };
+  }, notify: false });
+  assert.equal(result.state, "uncertain"); assert.equal(wake.wakeStatus(f.controller).paused, true);
+});
+test("人工拾取只确认指定事件且可重复，其他交付继续等待", async () => {
+  const f = fixture(); state.appendEvent(f.id, { type: "instruction_completed" }); state.appendEvent(f.id, { type: "needs_input" });
+  const one = queue.pendingWakeEvents(f.folder)[0].id;
+  const args = { action: "pickup", controller_id: f.controller, event_ids: [one], resolution: "已人工读取并处理指定交付" };
+  const result = await wake.wakeControl(args); assert.equal(result.pending, 1);
+  assert.equal((await wake.wakeControl(args)).pending, 1);
+});
 test.after(() => {
   assert.equal(path.dirname(path.resolve(root)), path.resolve(os.tmpdir()));
   fs.rmSync(fs.realpathSync.native(root), { recursive: true, force: true });

@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { shouldWake } from "./协作策略.mjs";
+import { atomicJson } from "./原子文件.mjs";
 
 export const WAKE_EVENTS = new Set(["instruction_completed", "instruction_failed", "StopFailure", "needs_input",
   "permission_pending", "permission_to_human", "process_exit", "recovery_failed", "recovery_exhausted", "session_start_blocked", "handback",
@@ -10,11 +11,7 @@ export function wakeDir(root, controller) {
   return path.join(root, "wake", crypto.createHash("sha256").update(String(controller)).digest("hex").slice(0, 32));
 }
 export function readWakeJson(file) { try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return null; } }
-export function writeWakeJson(file, value) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const temporary = `${file}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`;
-  fs.writeFileSync(temporary, JSON.stringify(value, null, 2), "utf8"); fs.renameSync(temporary, file);
-}
+export const writeWakeJson = atomicJson;
 export function enqueueWakeEvent(root, taskId, event) {
   if (!WAKE_EVENTS.has(event.type) || event.type === "StopFailure" && event.agentId) return false;
   const backend = event.backend || "native";
@@ -46,9 +43,11 @@ export function pendingWakeEvents(folder) {
     .filter(Boolean).sort((a, b) => String(a.at).localeCompare(String(b.at)) || a.id.localeCompare(b.id));
 }
 
-export function acknowledgeWakeEvents(folder, events) {
+export function acknowledgeWakeEvents(folder, events, details = {}) {
   for (const event of events) {
-    writeWakeJson(path.join(folder, "ack", `${event.id}.json`), { id: event.id, at: new Date().toISOString() });
+    const ackFile = path.join(folder, "ack", `${event.id}.json`);
+    if (!readWakeJson(ackFile)) writeWakeJson(ackFile, { id: event.id, taskId: event.taskId, requestId: event.requestId || null, backend: event.backend,
+      at: new Date().toISOString(), ...details });
     try { fs.unlinkSync(path.join(folder, "queue", `${event.id}.json`)); } catch {}
   }
 }

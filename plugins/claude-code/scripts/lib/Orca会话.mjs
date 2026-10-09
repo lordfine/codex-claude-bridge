@@ -5,10 +5,12 @@ import crypto from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { MANAGED_ROOT, controllerId, readJson, writeJson, resolveModel, listTasks, readRuntime } from "./managed-state.mjs";
-import { observeInstruction, readHistory, diagnoseCursor, observeHumanActivity } from "./会话读取.mjs";
+import { observeInstruction, readHistory, diagnoseCursor, observeHumanActivity, readTaskResult, scanSession, entryText } from "./会话读取.mjs";
 import { effectiveProfile, validateProfile, prepareRecordDocuments, deliveryInstruction } from "./协作策略.mjs";
 import { orcaLaunch, executable as resolveExecutable } from "./平台适配.mjs";
 import { statusResponse } from "./状态响应.mjs";
+import { pendingWakeEvents, wakeDir } from "./事件队列.mjs";
+import { updateJson } from "./原子文件.mjs";
 
 const execute = promisify(execFile);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -64,7 +66,7 @@ export function statusIdentity(lines) {
 
 export function emptyPrompt(lines) {
   const prompts = lines.filter((line) => /^\s*[❯>]\s*/.test(line));
-  return Boolean(prompts.length && /^\s*[❯>]\s*(?:Try\s+".*")?\s*$/.test(prompts.at(-1)));
+  return Boolean(prompts.length && /^\s*[❯>]\s*(?:(?:Try|试试|尝试)\s*["“「].*["”」])?\s*$/.test(prompts.at(-1)));
 }
 
 function transcriptFile(sessionId) {
@@ -156,11 +158,12 @@ export function createOrcaAdapter({ call = orcaCall, root = path.join(MANAGED_RO
     r.revision = crypto.createHash("sha256").update(JSON.stringify([r.lastInstruction.state, turn.started, turn.firstAssistantUuid, turn.ambiguous, turn.changed, turn.available, r.owner, r.cancelRequested, turn.backgroundOutstanding, r.terminalBlocker, r.controlRevision])).digest("hex");
     const fresh = readJson(recordPath(r.id));
     if (fresh && (fresh.lastInstruction?.requestId !== r.lastInstruction.requestId || fresh.controlRevision !== r.controlRevision || fresh.state !== r.state)) return { ...summary(fresh), changedDuringObservation: true, turn: null };
-    writeJson(recordPath(r.id), r);
+    const committed = updateJson(recordPath(r.id), (current) => current?.lastInstruction?.requestId === r.lastInstruction.requestId && current.controlRevision === r.controlRevision && current.state === r.state ? { ...current, observation: r.observation, lastInstruction: r.lastInstruction, owner: r.owner, revision: r.revision } : undefined);
+    if (committed?.lastInstruction?.requestId !== r.lastInstruction.requestId || committed?.controlRevision !== r.controlRevision) return { ...summary(committed), changedDuringObservation: true, turn: null };
     const { text, ...short } = turn;
     const unchanged = args.after_revision === r.revision;
     return statusResponse({ ...summary(r), unchanged, turn: unchanged ? null : { ...short, ...(args.include_text ? { text } : {}) },
-      submission: { state: turn.completed ? "completed" : turn.started ? "started" : turn.logged ? "received" : ["accepted", "started"].includes(r.lastInstruction.state) ? "sent_unconfirmed" : "pending_send",
+      submission: { kind: r.lastInstruction.kind === "compact" ? "command" : "task", state: turn.completed ? "completed" : turn.started ? "started" : turn.logged ? "received" : ["accepted", "started"].includes(r.lastInstruction.state) ? "sent_unconfirmed" : "pending_send",
         logged: Boolean(turn.logged), started: Boolean(turn.started), userUuid: turn.userUuid || null, firstAssistantUuid: turn.firstAssistantUuid || null, requestId: r.lastInstruction.requestId } });
   }
 
@@ -198,7 +201,11 @@ export function createOrcaAdapter({ call = orcaCall, root = path.join(MANAGED_RO
   }
 
   async function operation(args, master, transaction = {}) {
-    if (args.action === "history") return readHistory(args);
+    if (args.action === "history") {
+      const record = args.id ? readJson(recordPath(args.id)) : null;
+      if (args.id && (!record || record.controllerId !== master)) throw new Error("接入记录不存在或属于其他主控");
+      return readHistory({ ...args, session_id: record?.sessionId || args.session_id, cwd: record?.cwd || args.cwd });
+    }
     if (args.action === "list") {
       if (!args.cwd || !path.isAbsolute(args.cwd)) throw new Error("须提供绝对工作区目录");
       const response = await call(["terminal", "list", "--worktree", `path:${args.cwd}`, "--limit", "100"], args.cwd);
@@ -264,6 +271,55 @@ export function createOrcaAdapter({ call = orcaCall, root = path.join(MANAGED_RO
     }
     if (!r || r.controllerId !== master) throw new Error("该 Orca 接入记录不属于当前 Codex 主控；修改操作须用create/attach返回的id");
     if (r.state !== "attached") throw new Error("接入已释放或关闭，须重新接入");
+    const queueFile = path.join(root, "队列", `${r.id}.json`);
+    if (args.action === "cancel_queued") {
+      const items = readJson(queueFile) || [], item = items.find((i) => i.requestId === args.queued_request_id);
+      if (!item || !["queued", "cancelled"].includes(item.state)) throw new Error("只可取消尚未发送的精确队列项；已发送或回执不明须核对原请求");
+      item.state = "cancelled"; item.cancelledAt ||= new Date().toISOString(); writeJson(queueFile, items);
+      return { id: r.id, requestId: item.requestId, state: "cancelled", inputMayHaveBeenSent: false };
+    }
+    if (args.action === "queue") {
+      const items = (readJson(queueFile) || []).map((item) => item.requestId === r.lastInstruction?.requestId && r.observation?.completed ? { ...item, state: "completed", commandCompleted: r.lastInstruction.kind === "compact", businessDelivered: r.lastInstruction.kind !== "compact" } : item);
+      const count = Math.min(Math.max(Number(args.limit) || 10, 1), 30), cap = Math.min(Math.max(Number(args.max_chars) || 2400, 1), 16000); let remaining = cap;
+      return { id: r.id, queue: items.slice(0, count).map(({ prompt, ...item }) => { const text = args.include_text ? redactText(prompt).slice(0, remaining) : undefined; remaining -= text?.length || 0; return { ...item, ...(text === undefined ? {} : { text }) }; }), total: items.length, truncated: items.length > count, message: "排队与提交回执不表示开工；命令完成与业务交付分别核验" };
+    }
+    if (args.action === "enqueue") {
+      if (typeof args.prompt !== "string" || !args.prompt.trim() || args.prompt.length > 50000 || /[\u0000-\u0008\u001b]/.test(args.prompt) || /^\s*\//.test(args.prompt) && !/^\/compact(?:\s|$)/.test(args.prompt)) throw new Error("排队仅支持普通正文或/compact，不能输入终端控制字符");
+      const items = readJson(queueFile) || [];
+      if (items.filter((i) => i.state === "queued").length >= 30) throw new Error("本会话等待队列已达30项");
+      const item = { requestId: args.request_id, prompt: args.prompt, state: "queued", createdAt: new Date().toISOString(), processDocs: args.process_docs !== false, deliveryLevel: args.delivery_level || "batch" };
+      writeJson(queueFile, [...items, item]);
+      return { id: r.id, requestId: item.requestId, submission: { state: "queued", submitted: false, started: false }, position: items.filter((i) => i.state === "queued").length + 1 };
+    }
+    if (args.action === "task_result") {
+      const turn = r.lastInstruction ? observe(r.sessionId, r.cwd, r.lastInstruction, r.observation || {}) : r.observation || {};
+      return readTaskResult(r.sessionId, r.cwd, args.task_id, { ...turn.background, ...turn.finishedBackground }, args.max_chars);
+    }
+    if (args.action === "dispatch_queue") {
+      const items = readJson(queueFile) || [];
+      const uncertain = items.find((i) => ["sending", "uncertain"].includes(i.state));
+      if (uncertain) {
+        const proof = r.lastInstruction?.requestId === uncertain.requestId && observe(r.sessionId, r.cwd, r.lastInstruction, r.observation || {});
+        if (!proof?.logged || !proof.userUuid || proof.changed || proof.gap || proof.ambiguous) return { id: r.id, needsAttention: true, requestId: uncertain.requestId, message: "排队输入回执不明，只核对confirm_submission，不重发" };
+        uncertain.state = proof.completed ? "completed" : "submitted"; uncertain.reconciledUserUuid = proof.userUuid; uncertain.transportReceiptLost = true;
+        writeJson(queueFile, items);
+      }
+      const item = items.find((i) => i.state === "queued");
+      if (!item) return { id: r.id, unchanged: true, queueEmpty: true };
+      if (item.retryAfter > Date.now()) return { id: r.id, submission: { state: "queued" }, retryAfter: item.retryAfter, modelCalls: 0 };
+      const current = r.lastInstruction && observe(r.sessionId, r.cwd, r.lastInstruction, r.observation || {});
+      if (current?.completed) for (const previous of items) if (previous.requestId === r.lastInstruction.requestId && previous.state === "submitted") { previous.state = "completed"; previous.completedAt = new Date().toISOString(); previous.commandCompleted = r.lastInstruction.kind === "compact"; previous.businessDelivered = r.lastInstruction.kind !== "compact"; }
+      if (r.owner === "human" || current?.backgroundOutstanding || current && !current.completed || current?.nextUserObserved || r.cancelRequested) return { id: r.id, submission: { state: "queued" }, waitingFor: "当前主轮、实际后台任务或人类指令", modelCalls: 0 };
+      if (pendingWakeEvents(wakeDir(path.dirname(root), master)).some((e) => e.taskId === r.id && e.requestId === r.lastInstruction?.requestId && ["instruction_completed", "stage_delivered"].includes(e.type))) return { id: r.id, submission: { state: "queued" }, waitingFor: "上一批交付尚未由主控接住", modelCalls: 0 };
+      // 先记录发送意图；进程中断后不能自动重放。
+      item.state = "sending"; writeJson(queueFile, items);
+      try {
+        const result = await operation({ action: item.prompt.startsWith("/compact") ? "command" : "send", id: r.id, controller_id: master,
+          request_id: item.requestId, prompt: item.prompt, process_docs: item.processDocs, delivery_level: item.deliveryLevel }, master, transaction);
+        item.state = "submitted"; item.submittedAt = new Date().toISOString(); item.orcaRequestId = result.receipt?.prompt?.requestId || null;
+        writeJson(queueFile, items); return { ...result, queuedRequestId: item.requestId };
+      } catch (error) { item.state = transaction.inputMayHaveBeenSent ? "uncertain" : "queued"; item.retryAfter = transaction.inputMayHaveBeenSent ? null : Date.now() + 5000; writeJson(queueFile, items); throw error; }
+    }
     if (args.action === "release") { r.controlRevision = (r.controlRevision || 0) + 1; r.state = "released"; writeJson(recordPath(r.id), r); return { ...summary(r), terminalKeptAlive: true }; }
     if (args.action === "rebind") return rebind(r, args);
     let t;
@@ -356,7 +412,7 @@ export function createOrcaAdapter({ call = orcaCall, root = path.join(MANAGED_RO
       r.controlRevision = (r.controlRevision || 0) + 1; r.cancelRequested = true; r.owner = "human"; writeJson(recordPath(r.id), r);
       return { ...summary(r), cancellation: "requested_unconfirmed", message: "已请求中断；尚未证明后台工具、子代理和人类队列全部停止，自动派发已暂停" };
     }
-    if (args.action === "transcript") return readHistory({ ...args, session_id: r.sessionId, cwd: r.cwd });
+    if (args.action === "transcript") return readHistory({ ...args, cursor: args.cursor || { offset: r.lastInstruction?.baseline || 0 }, roles: ["assistant"], session_id: r.sessionId, cwd: r.cwd });
     if (args.action === "read") {
       const options = ["terminal", "read", "--terminal", r.terminalId, "--limit", String(Math.min(Math.max(Number(args.limit) || 60, 1), 300))];
       if (args.cursor != null) options.push("--cursor", String(args.cursor));
@@ -383,13 +439,19 @@ export function createOrcaAdapter({ call = orcaCall, root = path.join(MANAGED_RO
         } finally { watcher?.close(); wake = null; }
         return statusResponse({ ...summary(r), unchanged: true, timedOut: true });
       }
-      const wait = await call(["terminal", "wait", "--terminal", r.terminalId, "--for", "tui-idle", "--timeout-ms", String(Math.min(Math.max(Number(args.timeout_ms) || 10000, 1), 60000))], r.cwd);
-      return { ...updateTurn(r, args), wait: { ...wait.result.wait, timedOut: !wait.result.wait.satisfied } };
+      try {
+        const wait = await call(["terminal", "wait", "--terminal", r.terminalId, "--for", "tui-idle", "--timeout-ms", String(Math.min(Math.max(Number(args.timeout_ms) || 10000, 1), 60000))], r.cwd);
+        return { ...updateTurn(r, args), wait: { ...wait.result.wait, timedOut: !wait.result.wait.satisfied } };
+      } catch (error) {
+        if (error.code !== "timeout") throw error;
+        return statusResponse({ ...updateTurn(r, args), timedOut: true, wait: { satisfied: false, timedOut: true }, nextAction: "等待到期未证明结束；使用after_revision续读，不重新发送" });
+      }
     }
-    if (args.action !== "send") throw new Error("未知 Orca 会话操作");
+    const isCommand = args.action === "command";
+    if (args.action !== "send" && !isCommand) throw new Error("未知 Orca 会话操作");
     if (r.owner === "human" || r.cancelRequested) throw new Error("会话由人类控制或取消尚未确认，先明确交回控制权");
     if (r.observation?.backgroundOutstanding) throw new Error("主轮结束但后台任务范围尚未确认，不继续派发");
-    if (!args.prompt || typeof args.prompt !== "string" || args.prompt.length > 50000 || /^[\s]*\//.test(args.prompt) || /[\u0000-\u0008\u001b]/.test(args.prompt)) throw new Error("须提供普通任务正文；不接受斜杠命令或终端控制字符");
+    if (!args.prompt || typeof args.prompt !== "string" || args.prompt.length > 50000 || (isCommand ? !/^\/compact(?:\s|$)/.test(args.prompt) : /^[\s]*\//.test(args.prompt)) || /[\u0000-\u0008\u001b]/.test(args.prompt)) throw new Error("send须为普通正文；command仅支持/compact；不接受终端控制字符");
     if (r.lastInstruction && !["completed", "cancelled", "interrupted_by_human"].includes(updateTurn(r).lastInstruction.state)) throw new Error("上一条指令尚未确认完成，先读取并核对，不能重复派发");
     if (r.owner === "human" || r.observation?.nextUserObserved) throw new Error("发现新增人类输入，保留管理；先理解新增意图并确认空闲后接续");
     const checked = await identity(t, r.cwd);
@@ -401,8 +463,14 @@ export function createOrcaAdapter({ call = orcaCall, root = path.join(MANAGED_RO
     r.lastInstruction = { requestId: args.request_id, marker, prompt: args.prompt, state: "pending", preparedAt: new Date().toISOString(), deliveryLevel: args.delivery_level || "batch", baseline: file ? fs.statSync(file).size : 0 };
     r.observation = null;
     r.humanActivity = null; r.managementCursor = { offset: r.lastInstruction.baseline };
-    const docs = args.process_docs === false ? null : prepareRecordDocuments(r, args.prompt);
+    const docs = args.process_docs === false || isCommand ? null : prepareRecordDocuments(r, args.prompt);
     const sentPrompt = args.prompt + `\n\n${marker}` + (docs ? deliveryInstruction(r, docs) : "");
+    r.lastInstruction.kind = isCommand ? "compact" : "task";
+    const registrationFile = path.join(path.dirname(root), "automation", `${r.sessionId}.json`);
+    const registrations = readJson(registrationFile) || [];
+    const registration = { sessionId: r.sessionId, cwd: r.cwd, incarnationId: r.incarnationId, runtimeId: r.runtimeId, controllerId: master,
+      requestId: args.request_id, marker, kind: isCommand ? "compact" : "task", text: sentPrompt, preparedAt: r.lastInstruction.preparedAt, state: "submitting" };
+    writeJson(registrationFile, [...registrations.slice(-99), registration]);
     r.lastInstruction.sentPromptHash = crypto.createHash("sha256").update(sentPrompt).digest("hex");
     writeJson(recordPath(r.id), r);
     // 写入不明时禁止自动重发；请求日志保留 pending，后续只读取实际状态。
@@ -411,6 +479,13 @@ export function createOrcaAdapter({ call = orcaCall, root = path.join(MANAGED_RO
     const receipt = response.result.send;
     r.lastInstruction.state = receipt.prompt?.stages?.includes("turn_started") ? "started" : receipt.accepted ? "accepted" : "rejected";
     r.lastInstruction.orcaRequestId = receipt.prompt?.requestId || response.result.mutation?.requestId;
+    registration.state = receipt.accepted ? "accepted" : "rejected"; registration.orcaRequestId = r.lastInstruction.orcaRequestId;
+    if (file && receipt.accepted) scanSession(file, { offset: r.lastInstruction.baseline }, { visit(entry) {
+      if (entry.type === "user" && entry.sessionId === r.sessionId && entry.cwd && normalized(entry.cwd) === normalized(r.cwd) && entry.userType === "external" && entry.entrypoint === "cli" && entryText(entry).trim() === sentPrompt.trim()) {
+        registration.messageUuid = entry.uuid || null; registration.messageAt = entry.timestamp || null; return { stop: true };
+      }
+    } });
+    writeJson(registrationFile, [...registrations.slice(-99), registration]);
     writeJson(recordPath(r.id), r);
     return { ...updateTurn(r, args), receipt, processDocuments: docs, message: "accepted 仅表示输入接收；logged/completed 由精确会话记录核对。回执不明时不重发。" };
   }
@@ -418,7 +493,7 @@ export function createOrcaAdapter({ call = orcaCall, root = path.join(MANAGED_RO
   return async (args = {}) => {
     const master = args.controller_id || controllerId();
     if (!master) throw new Error("请提供 Codex 主控任务 ID");
-    const mutate = ["create", "attach", "send", "release", "close", "takeover", "cancel", "repair_cursor", "rebind", "submit_draft"].includes(args.action);
+    const mutate = ["create", "attach", "send", "command", "enqueue", "cancel_queued", "dispatch_queue", "release", "close", "takeover", "cancel", "repair_cursor", "rebind", "submit_draft"].includes(args.action);
     if (!mutate) return operation(args, master);
     if (!args.request_id || typeof args.request_id !== "string" || args.request_id.length > 120) throw new Error("改变 Orca 会话须提供稳定 request_id");
     // 跨 MCP 进程串行修改，崩溃后的请求保持不明状态，不能凭空重复新建或发送。
@@ -452,7 +527,7 @@ export function createOrcaAdapter({ call = orcaCall, root = path.join(MANAGED_RO
       try {
         const result = await operation(args, master, transaction); writeJson(file, { signature, state: "done", result }); return result;
       } catch (error) {
-        const beforeInput = ["send", "submit_draft"].includes(args.action) && (!transaction.inputMayHaveBeenSent || error.details?.inputRejected === true);
+        const beforeInput = ["send", "command", "dispatch_queue", "submit_draft"].includes(args.action) && (!transaction.inputMayHaveBeenSent || error.details?.inputRejected === true);
         writeJson(file, { signature, state: beforeInput ? "rejected_before_submission" : "uncertain", inputMayHaveBeenSent: !beforeInput, message: error.message }); throw error;
       }
     } finally { fs.unlinkSync(path.join(lock, "持有者.json")); fs.rmdirSync(lock); }

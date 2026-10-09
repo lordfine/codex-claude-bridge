@@ -2,28 +2,32 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { MANAGED_ROOT, controllerId, listTasks, readJson, readRuntime } from "./managed-state.mjs";
-import { coordinationConfig } from "./协作策略.mjs";
+import { coordinationConfig, effectiveProfile } from "./协作策略.mjs";
 import { wakeStatus } from "./事件续接.mjs";
 import { redactText } from "./会话读取.mjs";
 import { statusResponse } from "./状态响应.mjs";
 
 const hash = (v) => crypto.createHash("sha256").update(JSON.stringify(v)).digest("hex");
+function needsAcceptance(backend, r, observer) {
+  const accepted = readJson(path.join(MANAGED_ROOT, "acceptance", `${backend}-${r.id}.json`));
+  return Boolean(observer?.handoffVerified && (accepted?.revision !== observer.handoffVerified.revision || accepted?.snapshot !== observer.handoffVerified.snapshot));
+}
 export function overview(args = {}) {
   const controller = args.controller_id || controllerId(); if (!controller) throw new Error("需要主控任务 ID");
   const limit = Math.min(Math.max(Number(args.limit) || 10, 1), 50);
   const tasks = listTasks(controller).filter((r) => !r.archivedAt && !r.supersededBy).map((r) => {
     const runtime = readRuntime(r.id), observer = readJson(path.join(MANAGED_ROOT, "observers", `native-${r.id}.json`));
-    return { backend: "native", taskId: r.id, sessionId: r.sessionId, workspace: r.cwd, executor: r.kind === "review" ? "Claude 审查" : "Claude 执行", owner: runtime?.owner || "codex",
+    return { backend: "native", taskId: r.id, sessionId: r.sessionId, workspace: r.cwd, profile: effectiveProfile(r), profileSource: r.coordinationProfile ? "session_override" : "controller", executor: r.kind === "review" ? "Claude 审查" : "Claude 执行", owner: runtime?.owner || "codex",
       state: runtime?.status === "exited" ? r.state : runtime?.status || r.state, phase: observer?.handoff?.phaseId || null,
       snapshot: observer?.handoffVerified?.snapshot || r.reviewRef || null, deliverySummary: redactText(observer?.handoff?.summary || "").slice(0, 300),
-      needsAcceptance: Boolean(observer?.handoffVerified), failure: runtime?.failure?.error || null, timing: { executionMs: runtime?.elapsedMs ?? r.elapsedMs ?? 0, waitingMs: runtime?.waitingMs ?? r.waitingMs ?? 0 } };
+      needsAcceptance: needsAcceptance("native", r, observer), failure: runtime?.failure?.error || null, timing: { executionMs: runtime?.elapsedMs ?? r.elapsedMs ?? 0, waitingMs: runtime?.waitingMs ?? r.waitingMs ?? 0 } };
   });
   try { for (const name of fs.readdirSync(path.join(MANAGED_ROOT, "orca", "会话")).filter((n) => /^[0-9a-f-]{36}\.json$/i.test(n))) {
     const r = readJson(path.join(MANAGED_ROOT, "orca", "会话", name)); if (r?.controllerId !== controller || r.state !== "attached") continue;
     const observer = readJson(path.join(MANAGED_ROOT, "observers", `orca-${r.id}.json`));
-    tasks.push({ backend: "orca", taskId: r.id, sessionId: r.sessionId, workspace: r.cwd, executor: "Claude 执行", owner: r.owner || "codex", state: r.lastInstruction?.state || r.state,
+    tasks.push({ backend: "orca", taskId: r.id, sessionId: r.sessionId, workspace: r.cwd, profile: effectiveProfile(r), profileSource: r.coordinationProfile ? "session_override" : "controller", executor: "Claude 执行", owner: r.owner || "codex", state: r.lastInstruction?.state || r.state,
       phase: observer?.handoff?.phaseId || null, snapshot: observer?.handoffVerified?.snapshot || null,
-      deliverySummary: redactText(observer?.handoff?.summary || "").slice(0, 300), needsAcceptance: Boolean(observer?.handoffVerified), failure: observer?.probe?.error || null,
+      deliverySummary: redactText(observer?.handoff?.summary || "").slice(0, 300), needsAcceptance: needsAcceptance("orca", r, observer), failure: observer?.probe?.error || null,
       binding: { state: observer?.probe?.stale ? "stale" : "observed", terminalId: r.terminalId }, terminalBlocker: r.terminalBlocker || null, uiDraft: r.uiDraft || null, activity: r.activityEvidence || null });
   } } catch {}
   const wake = wakeStatus(controller), revision = hash([tasks.map((t) => ({ ...t, activity: t.activity && { revision: t.activity.revision, suspectedStall: t.activity.suspectedStall } })), wake.enabled, wake.paused, wake.pending, wake.activeRunId]);

@@ -33,9 +33,11 @@ const MANAGED_TOOLS = [
     }, required: ["session_id", "cwd"], additionalProperties: false }
   },
   {
-    name: "delegate_orca", description: "管理 Orca 原生 Claude 会话。status 默认短状态，用 after_revision 去重；transcript/history 按正文游标分页，read 的 screen_revision 独立去重屏幕。取消返回请求状态，不能据此声称后台全部停止。通过 delegate_wake 可接入本地事件续接；仍不提供 Orca 自动合并和统一执行预算。",
+    name: "delegate_orca", description: "管理Orca原生Claude会话。主会话交付正文用action=transcript＋接入id，默认仅本次指令的助手回复；历史用history，消息limit与正文max_chars分别限额。task_result仅用于已登记的子代理ID，不能用它读取主会话正文。enqueue保存普通指令或/compact，queue查顺序，空闲后本地调度推进；accepted不等于开工。status用after_revision去重，read的屏幕游标独立。取消请求不证明全部停止；仍不提供Orca自动合并与统一预算。",
     inputSchema: { type: "object", properties: {
-      action: { type: "string", enum: ["list", "create", "attach", "send", "status", "read", "wait", "release", "close", "takeover", "cancel", "transcript", "history", "diagnose", "repair_cursor", "human_activity", "rebind", "submit_draft", "confirm_submission"] },
+      action: { type: "string", enum: ["list", "create", "attach", "send", "command", "enqueue", "queue", "cancel_queued", "dispatch_queue", "task_result", "status", "read", "wait", "release", "close", "takeover", "cancel", "transcript", "history", "diagnose", "repair_cursor", "human_activity", "rebind", "submit_draft", "confirm_submission"] },
+      queued_request_id: { type: "string", description: "cancel_queued专用：尚未发送的排队项原request_id" },
+      task_id: { type: "string", description: "task_result专用：当前Claude会话中已经登记的原后台任务或子代理ID" },
       controller_id: { type: "string" }, cwd: { type: "string" }, id: { type: "string", description: "桥接接入记录UUID，即create/attach/rebind返回的id；绝不能传Claude session_id或terminal_id。status/read/wait/send均用此id。" },
       session_id: { type: "string" }, terminal_id: { type: "string" }, idle_confirmed: { type: "boolean" },
       request_id: { type: "string" }, title: { type: "string" }, model: { type: "string" }, prompt: { type: "string" },
@@ -172,7 +174,9 @@ const MANAGED_TOOLS = [
   {
     name: "delegate_wake", description: "diagnose 查看当前故障、心跳与通知回执；inspect/resolve 处理CLI运行，resolve_fault按故障编号和修复依据独立恢复调度。enable不解除故障，effectiveState区分启用与暂停。恢复不清空事件、不改变原启用配置。",
     inputSchema: { type: "object", properties: {
-      action: { type: "string", enum: ["configure", "enable", "disable", "status", "resolve", "sync", "inspect", "diagnose", "resolve_fault"] },
+      action: { type: "string", enum: ["configure", "enable", "disable", "status", "resolve", "sync", "inspect", "diagnose", "resolve_fault", "pickup"] },
+      event_ids: { type: "array", items: { type: "string" }, description: "pickup确认已经人工处理的精确排队事件id；不会确认其他事件" },
+      delivery_revision: { type: "string" }, delivery_snapshot: { type: "string" },
       task_id: { type: "string" }, backend: { type: "string", enum: ["native", "orca"] }, request_id: { type: "string" },
       controller_id: { type: "string" }, target_thread_id: { type: "string" }, cwd: { type: "string" },
       quiet_seconds: { type: "integer", minimum: 1, maximum: 30 }, run_id: { type: "string" }, fault_id: { type: "string" },

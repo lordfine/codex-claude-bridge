@@ -33,7 +33,11 @@ function controller(value) {
 
 function ownership(id, controllerIdValue) {
   const task = readTask(id);
-  if (!task) throw new Error("任务不存在");
+  if (!task) {
+    const orca = readJson(path.join(MANAGED_ROOT, "orca", "会话", `${id}.json`));
+    if (orca?.controllerId === controller(controllerIdValue)) throw new Error("该编号属于Orca后端；请使用delegate_orca action=wait/status及原接入id，会话并未因此结束");
+    throw new Error("任务不存在");
+  }
   if (task.controllerId !== controller(controllerIdValue)) throw new Error("任务不属于当前 Codex 主控任务");
   return task;
 }

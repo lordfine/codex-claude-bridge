@@ -22,6 +22,7 @@ function fixture() {
     else if (key === "terminal create") { state.launches++; result = { terminal: t }; }
     else if (key === "terminal close") result = {};
     else if (key === "terminal send") {
+      if (args.includes("--wait-submit") && state.sendError) throw Object.assign(new Error("输入发送后回执丢失"), { code:"TRANSPORT_FAILED" });
       const text = value("--text");
       if (text === "/status") state.screen = [`Session ID: ${state.session}`, `cwd: ${cwd}`];
       else if (text === "\u001b") state.screen = ["❯"];
@@ -33,6 +34,40 @@ function fixture() {
   const attach = (extra = {}) => api({ action: "attach", cwd, session_id: session, idle_confirmed: true, controller_id: "主控一", request_id: "接入一", ...extra });
   return { root, cwd, session, calls, t, state, api, attach };
 }
+
+test("指令可持久排队，未发送时不声称开工；派发后不重复发送", async () => {
+  const f = fixture(), record = await f.attach();
+  const args = { action: "enqueue", id: record.id, controller_id: "主控一", request_id: "排队一", prompt: "只回复排队验证", process_docs: false };
+  const before = f.calls.length, queued = await f.api(args);
+  assert.equal(queued.submission.state, "queued"); assert.equal(queued.submission.started, false);
+  assert.equal(f.calls.length, before);
+  assert.equal((await f.api(args)).duplicate, true);
+  await f.api({ action: "dispatch_queue", id: record.id, controller_id: "主控一", request_id: "推进一" });
+  assert.equal(f.calls.filter((c) => c[1] === "send" && c.includes("--wait-submit")).length, 1);
+  await f.api({ action: "dispatch_queue", id: record.id, controller_id: "主控一", request_id: "推进二" });
+  assert.equal(f.calls.filter((c) => c[1] === "send" && c.includes("--wait-submit")).length, 1);
+  const view = await f.api({ action: "queue", id: record.id, controller_id: "主控一" }); assert.equal(view.queue[0].state, "submitted");
+});
+test("排队发送前失败保留同一队列项，尚忙时不发送", async () => {
+  const f=fixture(), r=await f.attach(); await f.api({action:"enqueue",id:r.id,controller_id:"主控一",request_id:"不明排队",prompt:"普通任务",process_docs:false});
+  f.state.idle=false;
+  await assert.rejects(f.api({action:"dispatch_queue",id:r.id,controller_id:"主控一",request_id:"尚忙推进"}),/尚未空闲/);
+  const view=await f.api({action:"queue",id:r.id,controller_id:"主控一"}); assert.equal(view.queue[0].state,"queued");
+  assert.equal(f.calls.some(c=>c.includes("--wait-submit")),false);
+});
+test("排队输入发送后回执不明，后续推进也禁止重发", async () => {
+  const f=fixture(),r=await f.attach();await f.api({action:"enqueue",id:r.id,controller_id:"主控一",request_id:"不明回执队列",prompt:"普通任务",process_docs:false});
+  f.state.sendError=true;await assert.rejects(f.api({action:"dispatch_queue",id:r.id,controller_id:"主控一",request_id:"不明回执推进"}),/回执丢失/);
+  const next=await f.api({action:"dispatch_queue",id:r.id,controller_id:"主控一",request_id:"不明回执再核对"});
+  assert.equal(next.needsAttention,true);assert.equal(f.calls.filter(c=>c.includes("--wait-submit")).length,1);
+});
+test("仅取消尚未发送的精确队列项，不发送终端输入", async () => {
+  const f=fixture(),r=await f.attach();await f.api({action:"enqueue",id:r.id,controller_id:"主控一",request_id:"待取消队列",prompt:"普通任务",process_docs:false});
+  const cancelled=await f.api({action:"cancel_queued",id:r.id,controller_id:"主控一",request_id:"取消待发一",queued_request_id:"待取消队列"});
+  assert.equal(cancelled.inputMayHaveBeenSent,false);assert.equal(cancelled.state,"cancelled");
+  const next=await f.api({action:"dispatch_queue",id:r.id,controller_id:"主控一",request_id:"取消后核对"});assert.equal(next.queueEmpty,true);
+  assert.equal(f.calls.some(c=>c.includes("--wait-submit")),false);
+});
 
 test("Orca重启后显式重绑定保留接入记录与原指令，既不重开也不重发", async () => {
   const f = fixture(), first = await f.attach();

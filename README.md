@@ -6,7 +6,7 @@
 
 **把一个需求，变成有分工、有进度、有验收的 AI 协作任务。**
 
-[![版本](https://img.shields.io/badge/版本-v0.20.0-303c3b)](https://github.com/lordfine/codex-claude-bridge/releases/latest)
+[![版本](https://img.shields.io/badge/版本-v0.21.0-303c3b)](https://github.com/lordfine/codex-claude-bridge/releases/latest)
 [![检查](https://github.com/lordfine/codex-claude-bridge/actions/workflows/test.yml/badge.svg)](https://github.com/lordfine/codex-claude-bridge/actions/workflows/test.yml)
 [![许可](https://img.shields.io/github/license/lordfine/codex-claude-bridge?label=许可)](./LICENSE)
 
@@ -99,6 +99,8 @@
 **0.20.0：完成事件实测与输入分层。** UI composer不再当作终端输入；提交状态由真实日志核验，低频只在整批或重大异常介入。新隔离会话已取得Claude完成→Codex实际复核的回执；原业务会话与共享Orca全应用重启仍单独待验。[验证记录](./docs/版本验证-0.20.0.md)
 
 ## 怎么开始？
+
+**0.21.0：少空等、少重读、可排队。** Windows 状态文件被短暂占用时重试；Codex写入器忙时保留交付退避。`/compact`、系统摘要和真人指令分开识别；支持指令排队、原子代理结果回读和人工处理回执。本次真实验证取得“两份Claude完成→一轮Codex验收”及“压缩命令→下一指令”的回执。[验证与限制](./docs/版本验证-0.21.0.md)
 
 先准备：**Codex、Claude Code、Node.js 20+、Git**。本文安装命令使用 Codex CLI；Windows 普通终端窗口还需要 **Windows Terminal、PowerShell 7**，Mac 使用系统 Terminal。Claude Code 必须已能使用你的当前登录或模型配置工作。
 

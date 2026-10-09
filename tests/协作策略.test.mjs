@@ -31,6 +31,59 @@ function fixture() {
   return { r, id, controllerId, sessionId, cwd, file, entry, append, folder };
 }
 
+test("历史消息上限与字符预算分别生效，游标续读不跳过", () => {
+  const f = fixture(); f.append(Array.from({ length: 5 }, (_, i) => f.entry("assistant", `回执${i}`)));
+  const one = reader.readHistory({ session_id: f.sessionId, cwd: f.cwd, limit: 2, max_chars: 1000 });
+  assert.equal(one.messages.length, 2); assert.equal(one.page.messageLimit, 2); assert.equal(one.hasMore, true);
+  const two = reader.readHistory({ session_id: f.sessionId, cwd: f.cwd, limit: 2, max_chars: 1000, cursor: one.nextCursor });
+  assert.equal(two.messages[0].text, "回执2");
+});
+test("主会话正文默认只取本次助手回复，不重读旧轮与原任务全文", async () => {
+  const f=fixture();f.append([f.entry("assistant","旧轮冗长正文")]);f.r.lastInstruction.baseline=fs.statSync(f.file).size;
+  state.writeJson(path.join(state.MANAGED_ROOT,"orca","会话",`${f.id}.json`),f.r);
+  f.append([f.entry("user","当前完整任务"),f.entry("assistant","本次完成回执")]);
+  const api=orcaModule.createOrcaAdapter({root:path.join(state.MANAGED_ROOT,"orca"),call:async()=>({result:{terminal:{handle:f.r.terminalId,incarnationId:f.r.incarnationId,worktreePath:f.cwd,agentIdentity:"claude",connected:true,writable:true}},_meta:{runtimeId:f.r.runtimeId}})});
+  const result=await api({action:"transcript",id:f.id,controller_id:f.controllerId});
+  assert.deepEqual(result.messages.map(m=>m.text),["本次完成回执"]);
+});
+test("后台任务逐个核销，TaskOutput的真实终态不清除其他活跃任务", () => {
+  const f = fixture(); f.append([
+    f.entry("user", "执行<bridge-instruction:test>"),
+    f.entry("assistant", [{ type: "tool_use", id: "工具一", input: { run_in_background: true } }, { type: "tool_use", id: "工具二", input: { run_in_background: true } }]),
+    f.entry("user", [{ type: "tool_result", tool_use_id: "工具一" }], { toolUseResult: { backgroundTaskId: "任务一" } }),
+    f.entry("user", [{ type: "tool_result", tool_use_id: "工具二" }], { toolUseResult: { backgroundTaskId: "任务二" } }),
+    f.entry("user", [{ type: "tool_result", tool_use_id: "读取工具" }], { toolUseResult: { task: { task_id: "任务一", status: "completed" } } }),
+    f.entry("assistant", "完成主轮", { message: { content: "完成主轮", stop_reason: "end_turn" } })
+  ]);
+  const result = reader.observeInstruction(f.sessionId, f.cwd, f.r.lastInstruction);
+  assert.equal(result.backgroundOutstanding, true); assert.equal(result.background["工具二"].taskId, "任务二");
+  assert.equal(result.finishedBackground["工具一"].status, "completed");
+});
+test("已完成子代理从原JSONL读取结果，不依赖空输出、不重派审查", () => {
+  const f = fixture(), agent = "a123456", dir = path.join(path.dirname(f.file), f.sessionId, "subagents");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, `agent-${agent}.jsonl`), JSON.stringify(f.entry("assistant", "原审查结论", { message: { content: "原审查结论", stop_reason: "end_turn" } })) + "\n");
+  const result = reader.readTaskResult(f.sessionId, f.cwd, agent, { 原任务: { taskId: agent, agentId: agent } });
+  assert.equal(result.resultState, "available"); assert.equal(result.source, "original_subagent_jsonl"); assert.equal(result.text, "原审查结论"); assert.equal(result.replayAllowed, false);
+  assert.throws(() => reader.readTaskResult(f.sessionId, f.cwd, "不登记的任务", {}));
+});
+test("注册的compact有精确来源及完成回执，真实外部命令仍是人类输入", () => {
+  const f = fixture(), marker = "<bridge-instruction:命令测试>", preparedAt = new Date(Date.now() - 1000).toISOString();
+  const file = path.join(state.MANAGED_ROOT, "automation", `${f.sessionId}.json`);
+  state.writeJson(file, [{ state: "accepted", sessionId: f.sessionId, cwd: f.cwd, incarnationId: "实例一", marker, preparedAt, kind: "compact", text: `/compact 保留检查点\n\n${marker}` }]);
+  const command = f.entry("user", `<command-name>/compact</command-name>\n<command-message>compact</command-message>\n<command-args>保留检查点\n\n${marker}</command-args>`, { userType: "external", entrypoint: "cli", timestamp: new Date().toISOString() });
+  const stdout = f.entry("user", "<local-command-stdout>Compacted</local-command-stdout>", { userType: "external", entrypoint: "cli", parentUuid: command.uuid });
+  f.append([command, stdout]);
+  const summary = f.entry("user", "这是旧对话的压缩摘要", { userType: "external", entrypoint: "cli", isCompactSummary: true, isVisibleInTranscriptOnly: true });
+  assert.equal(reader.messageOrigin(summary), "system_summary");
+  assert.equal(reader.messageOrigin({ ...summary, isCompactSummary: false }), "human_input");
+  assert.equal(reader.messageOrigin(command), "automation_input");
+  assert.equal(reader.messageOrigin({ ...command, message: { content: command.message.content.replace("保留检查点", "真人指令") } }), "human_input");
+  const instruction = { ...f.r.lastInstruction, marker, kind: "compact" };
+  const turn = reader.observeInstruction(f.sessionId, f.cwd, instruction);
+  assert.equal(turn.commandState, "completed"); assert.equal(turn.completed, true); assert.equal(Boolean(turn.nextUserObserved), false);
+});
+
 test("4KB中文指令加图片附件与超过旧窗口的工具日志，能够识别完成", () => {
   const f = fixture(), prompt = "修复界面".repeat(400);
   f.r.lastInstruction.prompt = prompt;
