@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { enqueueWakeEvent } from "./事件队列.mjs";
+import { atomicJson } from "./原子文件.mjs";
 
 export const MANAGED_ROOT = process.env.CC_PLUGIN_CODEX_MANAGED_DIR ||
   path.join(os.homedir(), ".cache", "cc-plugin-codex", "managed");
@@ -30,13 +31,7 @@ export function taskPath(id, name) {
   return path.join(taskDir(id), name);
 }
 
-export function writeJson(file, value) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const temporary = `${file}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`;
-  fs.writeFileSync(temporary, JSON.stringify(value, null, 2), "utf8");
-  fs.renameSync(temporary, file);
-  return value;
-}
+export const writeJson = atomicJson;
 
 export function readJson(file) {
   try { return JSON.parse(fs.readFileSync(file, "utf8")); }

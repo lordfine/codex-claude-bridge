@@ -10,6 +10,7 @@ import { attentionNotice } from "./本地提醒.mjs";
 import { observeHumanActivity } from "./会话读取.mjs";
 import { logActivity } from "./日志活动.mjs";
 import { coordinationConfig } from "./协作策略.mjs";
+import { updateJson } from "./原子文件.mjs";
 
 const hash = (s) => crypto.createHash("sha256").update(s).digest("hex");
 export async function observeLocalRecords(controller, { root = MANAGED_ROOT, observe = readTurn, probe = probeOrcaRecord, now = Date.now() } = {}) {
@@ -50,7 +51,7 @@ export async function observeLocalRecords(controller, { root = MANAGED_ROOT, obs
       if (fresh?.state === "attached" && fresh.controlRevision === r.controlRevision) {
         fresh.uiDraft = next.probe.uiDraft || null;
         fresh.terminalBlocker = next.probe.stale ? { kind: "binding_stale", code: next.probe.code || "BINDING_STALE" } : next.probe.error ? { kind: "probe_error", code: next.probe.error } : blockingInput && !ownedEcho ? { kind: "terminal_input", ...(next.probe.draftEvidence || { present: true, source: "unknown" }) } : null;
-        writeJson(recordFile, fresh);
+        updateJson(recordFile, (current) => current?.controlRevision === r.controlRevision && current?.state === "attached" ? { ...current, uiDraft: fresh.uiDraft, terminalBlocker: fresh.terminalBlocker } : undefined);
       }
     }
     if (backend === "orca" && r.lastInstruction && !["cancelled", "human_handoff"].includes(r.lastInstruction.terminalState)) {
@@ -75,7 +76,7 @@ export async function observeLocalRecords(controller, { root = MANAGED_ROOT, obs
           if (turn.notificationBoundaryRepaired) fresh.humanActivity = null;
           if (turn.nextUserObserved) fresh.owner = "human";
           fresh.revision = hash(JSON.stringify([fresh.lastInstruction.state, turn.text, turn.ambiguous, turn.changed, turn.available, fresh.owner, fresh.cancelRequested, turn.backgroundOutstanding]));
-          writeJson(recordFile, fresh);
+          updateJson(recordFile, (current) => current?.controlRevision === r.controlRevision && current?.lastInstruction?.requestId === r.lastInstruction?.requestId && current?.state === "attached" ? { ...current, observation: fresh.observation, lastInstruction: { ...current.lastInstruction, state: fresh.lastInstruction.state }, activityEvidence: fresh.activityEvidence, owner: fresh.owner, revision: fresh.revision, humanActivity: fresh.humanActivity } : undefined);
         }
       }
     } else if (backend === "native") {
@@ -92,7 +93,7 @@ export async function observeLocalRecords(controller, { root = MANAGED_ROOT, obs
         if (fresh?.state === "attached" && fresh.controlRevision === r.controlRevision && fresh.lastInstruction?.requestId === r.lastInstruction?.requestId) {
           fresh.humanActivity = activity;
           if (activity.userCount && !activity.changed && !activity.gap) fresh.owner = "human";
-          writeJson(recordFile, fresh);
+          updateJson(recordFile, (current) => current?.controlRevision === r.controlRevision && current?.lastInstruction?.requestId === r.lastInstruction?.requestId && current?.state === "attached" ? { ...current, humanActivity: activity, owner: fresh.owner } : undefined);
         }
         if (activity.userCount && activity.completed) {
           const checked = await probe(r); next.probe = checked;
@@ -116,10 +117,15 @@ export async function observeLocalRecords(controller, { root = MANAGED_ROOT, obs
       next.handoffSignature = signature;
     }
     next.checkedAt = now; next.retryAfter = null;
-    if (backend === "orca" && next.completionCandidate && !next.pendingHandoff) emit("instruction_completed", next.completionCandidate, { level: r.lastInstruction.deliveryLevel || "batch" });
+    if (backend === "orca" && next.completionCandidate && !next.pendingHandoff && r.lastInstruction.kind !== "compact") emit("instruction_completed", next.completionCandidate, { level: r.lastInstruction.deliveryLevel || "batch" });
     if (previous.faultId) {
       const file = path.join(wakeDir(root, controller), "faults", `${previous.faultId}.json`), fault = readWakeJson(file);
-      if (fault?.state === "active") writeWakeJson(file, { ...fault, state: "observation_recovered", recoveredAt: new Date().toISOString() });
+      if (fault?.state === "active") {
+        const recoveredAt = new Date().toISOString();
+        writeWakeJson(file, { ...fault, state: "observation_recovered", recoveredAt });
+        const noticeFile = path.join(wakeDir(root, controller), "attention.json"), notice = readWakeJson(noticeFile);
+        if (notice?.faultId === fault.id) writeWakeJson(noticeFile, { ...notice, state: "observation_recovered", recoveredAt, requiresAction: false });
+      }
     }
     next.faultId = null; writeJson(stateFile, next);
     } catch (error) {
