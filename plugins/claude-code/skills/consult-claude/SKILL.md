@@ -31,13 +31,13 @@ Codex 负责目标、范围、阶段决策和最终验收；Claude 负责定位�
 
 原生派发需要阶段记录时传 `process_docs=true`；Orca 发送默认准备 `.协作记录/<任务标识>/`，也可用 `delegate_coordination(prepare)`。交付用短报告、实际检查与稳定快照；取交付用 `handoff`。只在需要时读 [任务与交付](./references/任务与交付.md)。
 
-需要自动协调时，先用 `delegate_wake(configure/enable)` 绑定当前主控的精确 Codex 存储 ID，确认 CLI 与记录就绪；它支持两条后端的本地观察。派发后保存状态并结束当前轮，关键事件再续接。无变化不使用 sleep→read/status 循环，计时结束也不制造新的思考轮。
+需要自动协调时，用 `delegate_wake(start)` 一次绑定当前主控的精确 Codex 存储 ID 与绝对 cwd 并启用，核对实际心跳；旧版仍可 configure/enable。start 不解除已有故障，也不证明交付已送达。派发后保存状态并结束当前轮，关键事件再续接。无变化不使用 sleep→read/status 循环，计时结束也不制造新的思考轮。
 
 新建长时间委派默认使用桥接事件驱动，不同时创建 Goal 自动续接。当前宿主尚未证实支持活动 Goal 的无模型外部等待；结束本轮不能阻止 Goal 再次唤醒。已有 Goal 保留原状态，向用户说明兼容边界与切换方式，只有明确授权才暂停。不得用 complete 或 blocked 伪造正常等待。三档都过滤普通心跳和无变化超时。
 
 先核对 `setup.service.version` 与能力列表，缺字段或缺 `resolve_fault` 表示旧运行实例，重载MCP后再操作。`workerReady` 仅证明新心跳，不证明消息已处理；真实完成事件、本次Codex run和复核结果才构成链路验收。
 
-续接时只处理提示指定的任务与后端，读短状态、当前交付与必要新增正文，安排下一阶段后退出。用户暂停则保持暂停。回执不明停自动派发并核对原请求，不换请求 ID 重发。详细顺序见 [验收与续接](./references/验收与续接.md)。
+续接时以预装 reports 为本批对象，当前交付快照可能已经是后续进度。已有报告及稳定性证明足够时直接验收关键文件，不补查相同内容。最终 results 按 event_id 记录 processed 或 deferred 及依据，只有实际处理项会被确认；遗漏项保留并挂起核对，避免自动循环。processed 不等于业务验收通过。原生正文用 delegate_transcript，Orca 正文才用 delegate_orca(transcript)。用户暂停则保持暂停。详细顺序见 [验收与续接](./references/验收与续接.md)。
 
 ## 读取与交接
 

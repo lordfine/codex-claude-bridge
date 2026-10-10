@@ -5,7 +5,7 @@ import crypto from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { MANAGED_ROOT, controllerId, readJson, writeJson, readTask, writeTask } from "./managed-state.mjs";
 import { redactText } from "./会话读取.mjs";
-import { prepareReporter } from "./主动回传.mjs";
+import { prepareReporter, reportPath } from "./主动回传.mjs";
 
 export const PROFILES = { high: 1, medium: 2, low: 3 };
 const LEVELS = { subtask: 1, milestone: 2, batch: 3, review: 3, final: 3 };
@@ -176,7 +176,7 @@ export function coordinationControl(args = {}) {
   }
   if (args.action === "report") {
     if (!/^[a-f0-9]{64}$/.test(args.report_id || "")) throw new Error("回传编号无效");
-    const report = readJson(path.join(MANAGED_ROOT, "reports", args.report_id + ".json"));
+    const report = readJson(reportPath(MANAGED_ROOT, backend, r.id, args.report_id));
     if (!report || report.taskId !== r.id || report.controllerId !== master || report.backend !== backend || report.sessionId !== r.sessionId) throw new Error("回传不属于此执行会话");
     return { reportId: report.reportId, requestId: report.requestId, at: report.at, ...report.data, acceptance: "not_verified" };
   }

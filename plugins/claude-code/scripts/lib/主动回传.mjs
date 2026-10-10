@@ -10,6 +10,32 @@ import { enqueueWakeEvent, wakeDir } from "./事件队列.mjs";
 const digest = (s) => crypto.createHash("sha256").update(s).digest("hex");
 const entry = fileURLToPath(new URL("../执行回传.mjs", import.meta.url));
 
+export function reportPath(root, backend, taskId, reportId) {
+  if (!["orca", "native"].includes(backend) || !/^[0-9a-f-]{36}$/i.test(taskId || "") || !/^[a-f0-9]{64}$/.test(reportId || "")) throw new Error("报告定位无效");
+  const file = path.join(root, "reports", "by-task", `${backend}-${taskId}`, `${reportId}.json`);
+  return fs.existsSync(file) ? file : path.join(root, "reports", `${reportId}.json`);
+}
+
+// 分任务保存不可变报告；当前交付只是供人阅读的快照，不承担可靠队列职责。
+export function outstandingReports(root, backend, record) {
+  const folder = path.join(root, "reports", "by-task", `${backend}-${record.id}`);
+  // 升级时补入旧格式；根目录未变化时不重复扫描其他任务的报告。
+  const legacy = path.join(root, "reports"), migration = path.join(folder, "迁移记录.json");
+  let signature; try { signature = fs.statSync(legacy).mtimeMs; } catch {}
+  if (signature && readJson(migration)?.signature !== signature) {
+    for (const name of fs.readdirSync(legacy).filter(n => /^[a-f0-9]{64}\.json$/.test(n))) {
+      const old = readJson(path.join(legacy, name));
+      if (old?.taskId === record.id && old.backend === backend && old.controllerId === record.controllerId && !fs.existsSync(path.join(folder, name))) writeJson(path.join(folder, name), old);
+    }
+    writeJson(migration, { signature });
+  }
+  let names; try { names = fs.readdirSync(folder); } catch { return []; }
+  return names.filter(n => /^[a-f0-9]{64}\.json$/.test(n)).map(n => readJson(path.join(folder, n)))
+    .filter(r => r?.taskId === record.id && r.backend === backend && r.sessionId === record.sessionId && r.controllerId === record.controllerId && ["completed", "blocked", "needs_decision"].includes(r.data?.status))
+    .filter(r => !readJson(path.join(wakeDir(root, record.controllerId), "ack", `${digest(`${record.id}:${r.eventId}`)}.json`)))
+    .sort((a, b) => a.at.localeCompare(b.at) || a.reportId.localeCompare(b.reportId));
+}
+
 export function prepareReportSession(record, { root = MANAGED_ROOT, backend = "orca" } = {}) {
   const file = path.join(root, "report-bindings", `${backend}-${record.id}.session.json`);
   writeJson(file, { scope: "session", root, backend, taskId: record.id, sessionId: record.sessionId, controllerId: record.controllerId });
@@ -75,12 +101,12 @@ export function executorInbox(context, evidenceId) {
 export function reportReceipt(context, reportId) {
   const { b } = loadBinding(context, true);
   if (!/^[a-f0-9]{64}$/.test(reportId || "")) throw new Error("回执编号无效");
-  const report = readJson(path.join(b.root, "reports", reportId + ".json"));
+  const report = readJson(reportPath(b.root, b.backend, b.taskId, reportId));
   if (!report || report.bindingKey !== digest(JSON.stringify(b))) throw new Error("回执不属于本次委派");
   const folder = wakeDir(b.root, b.controllerId), queueId = digest(`${b.taskId}:${report.eventId}`);
   const ack = readJson(path.join(folder, "ack", `${queueId}.json`));
   const latest = readJson(path.join(b.root, "reports", `${digest(JSON.stringify(b))}.index.json`))?.latest;
-  return { reportId, requestId: b.requestId, saved: true, delivery: ack ? "processed" : fs.existsSync(path.join(folder, "queue", `${queueId}.json`)) ? "queued" : latest && latest !== reportId ? "superseded" : "pending_observation",
+  return { reportId, requestId: b.requestId, saved: true, delivery: ack ? "processed" : fs.existsSync(path.join(folder, "queue", `${queueId}.json`)) ? "queued" : report.data.status === "progress" ? latest && latest !== reportId ? "superseded" : "saved_progress" : "pending_observation",
     acceptance: "not_verified", processedAt: ack?.at || null, modelCalls: 0 };
 }
 
@@ -99,11 +125,12 @@ export function submitReport(context, input) {
   const reportId = digest(`${JSON.stringify(b)}:${data.report_key}`), phase = `report-${reportId.slice(0, 40)}`;
   const urgent = ["blocked", "needs_decision"].includes(data.status);
   const eventId = urgent ? reportId : digest(`${b.backend}:${b.taskId}:${phase}:stage_delivered`);
-  const file = path.join(b.root, "reports", `${reportId}.json`);
+  const file = path.join(b.root, "reports", "by-task", `${b.backend}-${b.taskId}`, `${reportId}.json`);
   let duplicate = false;
   updateJson(path.join(b.root, "reports", `${digest(JSON.stringify(b))}.index.json`), index => {
-    const old = readJson(file);
+    const old = readJson(reportPath(b.root, b.backend, b.taskId, reportId));
     if (old) { if (JSON.stringify(old.data) !== JSON.stringify(data)) throw new Error("同一 report_key 内容变化；修订结果须使用新编号"); duplicate = true; return undefined; }
+    writeJson(file, { reportId, bindingKey: digest(JSON.stringify(b)), eventId, requestId: b.requestId, taskId: b.taskId, backend: b.backend, controllerId: b.controllerId, sessionId: b.sessionId, data, at: new Date().toISOString() });
   const handoff = path.join(b.cwd, ".协作记录", b.taskId, "当前交付.md");
   // 重试已保存回执不覆盖随后产生的新交付。
   if (!duplicate) {
@@ -113,7 +140,6 @@ export function submitReport(context, input) {
       requires_decision: urgent || data.status === "completed" && ["batch", "review", "final"].includes(level), summary: data.summary, checks: data.checks, unresolved: data.unresolved, snapshot: "capture" };
     atomicText(handoff, `# 执行回传\n\n\`\`\`json\n${JSON.stringify(contract, null, 2)}\n\`\`\`\n`);
   }
-    writeJson(file, { reportId, bindingKey: digest(JSON.stringify(b)), eventId, requestId: b.requestId, taskId: b.taskId, backend: b.backend, controllerId: b.controllerId, sessionId: b.sessionId, data, at: new Date().toISOString() });
     return { latest: reportId, previous: index?.latest || null };
   });
   if (urgent) enqueueWakeEvent(b.root, b.taskId, { type: "needs_input", eventId, reportId, backend: b.backend, requestId: b.requestId, at: new Date().toISOString(), requiresDecision: true });

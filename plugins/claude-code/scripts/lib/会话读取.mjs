@@ -148,9 +148,9 @@ export function scanSession(file, cursor = {}, { budget = 4 * 1024 * 1024, visit
   return { cursor: { offset, generation }, hasMore: offset < stat.size && !awaitingData, awaitingData, changed: false, gap, bytesScanned: readAt - start };
 }
 
-export function findSession(sessionId, cwd) {
+export function findSession(sessionId, cwd, { allowMissingDirectory = false } = {}) {
   if (!UUID.test(String(sessionId))) throw new Error("须提供精确 Claude 会话 UUID");
-  if (!cwd || !path.isAbsolute(cwd) || !fs.existsSync(cwd)) throw new Error("须提供存在的原绝对目录");
+  if (!cwd || !path.isAbsolute(cwd) || !allowMissingDirectory && !fs.existsSync(cwd)) throw new Error("须提供存在的原绝对目录");
   const root = path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude"), "projects");
   let dirs; try { dirs = fs.readdirSync(root, { withFileTypes: true }); } catch { throw new Error("没有本地 Claude 会话记录"); }
   const matches = dirs.filter((d) => d.isDirectory()).map((d) => path.join(root, d.name, `${sessionId.toLowerCase()}.jsonl`)).filter(fs.existsSync);

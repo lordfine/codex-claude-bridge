@@ -3,7 +3,8 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { MANAGED_ROOT, listTasks, readJson, writeJson, readRuntime } from "./managed-state.mjs";
 import { readTurn, probeOrcaRecord } from "./Orca会话.mjs";
-import { readHandoff } from "./协作策略.mjs";
+import { readHandoff, workspaceFingerprint } from "./协作策略.mjs";
+import { outstandingReports } from "./主动回传.mjs";
 import { enqueueWakeEvent, wakeDir, readWakeJson, writeWakeJson } from "./事件队列.mjs";
 import { recordSchedulerFault } from "./续接诊断.mjs";
 import { attentionNotice } from "./本地提醒.mjs";
@@ -81,7 +82,7 @@ export async function observeLocalRecords(controller, { root = MANAGED_ROOT, obs
       }
     } else if (backend === "native") {
       const runtime = readRuntime(r.id);
-      completed = Boolean(runtime && !runtime.busy && !runtime.activeSubagents?.length && !runtime.humanDraft && !runtime.humanQueued && !runtime.queue?.length);
+      completed = Boolean(runtime && runtime.owner !== "human" && !runtime.busy && !runtime.activeSubagents?.length && !runtime.humanDraft && !runtime.humanQueued && !runtime.humanInFlightCount && !runtime.queue?.length);
     }
     if (backend === "orca" && !r.cancelRequested) {
       const boundary = next.observation?.humanBoundary;
@@ -101,13 +102,34 @@ export async function observeLocalRecords(controller, { root = MANAGED_ROOT, obs
         }
       }
     }
+    const reports = outstandingReports(root, backend, r);
+    const snapshot = completed && reports.some(p => p.data.status === "completed") ? workspaceFingerprint(r.cwd) : null;
+    next.reportCandidates = {}; next.reportsVerified = {};
+    for (const report of reports) {
+      const urgent = ["blocked", "needs_decision"].includes(report.data.status);
+      const currentRequest = backend === "orca" ? r.lastInstruction?.requestId : readRuntime(r.id)?.current?.id || r.lastInstruction?.requestId;
+      const historical = report.requestId !== currentRequest;
+      if (!historical) next.reportedRequestId = currentRequest;
+      const ready = !historical && completed && snapshot && previous.reportCandidates?.[report.reportId] === snapshot;
+      if (snapshot && !historical) next.reportCandidates[report.reportId] = snapshot;
+      if (ready) next.reportsVerified[report.reportId] = { snapshot, requestId: report.requestId, observedAt: new Date(now).toISOString() };
+      if (urgent || historical || ready) enqueueWakeEvent(root, r.id, {
+        type: urgent ? "needs_input" : "stage_delivered", eventId: report.eventId, reportId: report.reportId,
+        backend, requestId: report.requestId, level: report.data.level, requiresDecision: urgent || historical || ["batch", "review", "final"].includes(report.data.level), at: report.at
+      });
+    }
     const handoffFile = path.join(r.cwd || "", ".协作记录", r.id, "当前交付.md");
     let signature; try { const s = fs.statSync(handoffFile); signature = `${s.size}:${s.mtimeMs}`; } catch {}
     if (signature && (signature !== next.handoffSignature || next.pendingHandoff)) {
       let handoff; try { handoff = readHandoff(r); } catch { handoff = { invalid: "快照核验失败" }; }
       if (handoff?.invalid) { next.handoffInvalid = handoff.invalid; next.pendingHandoff = null; }
       else if (handoff) {
-        if (handoff.reportId && ["blocked", "needs_decision"].includes(handoff.reportStatus)) {
+        if (handoff.reportId && (reports.some(p => p.reportId === handoff.reportId) || handoff.reportStatus === "progress")) {
+          // 主动回传由独立报告观察；普通进度仅更新快照，不再产生模型轮。
+          next.pendingHandoff = null;
+          if (next.reportsVerified[handoff.reportId]?.snapshot === handoff.snapshot) next.handoffVerified = { revision: handoff.revision, snapshot: handoff.snapshot };
+        }
+        else if (handoff.reportId && ["blocked", "needs_decision"].includes(handoff.reportStatus)) {
           enqueueWakeEvent(root, r.id, { type: "needs_input", eventId: handoff.reportId, reportId: handoff.reportId, backend, requestId: handoff.requestId, requiresDecision: true, at: new Date(now).toISOString() });
           next.pendingHandoff = null;
         }
@@ -120,8 +142,9 @@ export async function observeLocalRecords(controller, { root = MANAGED_ROOT, obs
       }
       next.handoffSignature = signature;
     }
+    if (next.handoff?.reportId && next.reportsVerified[next.handoff.reportId]?.snapshot === next.handoff.snapshot) next.handoffVerified = { revision: next.handoff.revision, snapshot: next.handoff.snapshot };
     next.checkedAt = now; next.retryAfter = null;
-    if (backend === "orca" && next.completionCandidate && !next.pendingHandoff && r.lastInstruction.kind !== "compact" && !(next.handoff?.reportId && next.handoff.reportStatus !== "progress" && next.handoff.requestId === next.completionCandidate)) emit("instruction_completed", next.completionCandidate, { level: r.lastInstruction.deliveryLevel || "batch" });
+    if (backend === "orca" && next.completionCandidate && next.reportedRequestId !== next.completionCandidate && !next.pendingHandoff && !reports.some(p => p.requestId === next.completionCandidate) && r.lastInstruction.kind !== "compact" && !(next.handoff?.reportId && next.handoff.reportStatus !== "progress" && next.handoff.requestId === next.completionCandidate)) emit("instruction_completed", next.completionCandidate, { level: r.lastInstruction.deliveryLevel || "batch" });
     if (previous.faultId) {
       const file = path.join(wakeDir(root, controller), "faults", `${previous.faultId}.json`), fault = readWakeJson(file);
       if (fault?.state === "active") {
