@@ -88,6 +88,17 @@ test("默认不限时，累计超过旧上限仍可执行；取消后活动状�
   assert.equal(state.readRuntime(run.task.id).busy, false); assert.equal(state.readRuntime(run.task.id).ready, false);
 });
 
+test("多行首条任务在Windows就绪后派发且不被MCP变长参数吞掉", async () => {
+  const prompt = "任务：验证\n交付：完整第二行";
+  const run = await start({ initialPrompt: prompt, initialRequestId: "多行请求", reportMcpConfig: "回传配置.json" });
+  await delay(1200);
+  const runtime = state.readRuntime(run.task.id), startup = state.readJson(state.taskPath(run.task.id, "fixture.json"));
+  assert.equal(runtime.current.id, "多行请求"); assert.equal(runtime.current.prompt, prompt); assert.equal(runtime.busy, true);
+  if (process.platform === "win32") assert.equal(startup.args.includes(prompt), false);
+  else assert.equal(startup.args[startup.args.indexOf(prompt) - 1], "--");
+  await control(run.task.id, { type: "cancel" }); await finish(run);
+});
+
 test("明确审批等待暂停执行预算，解决后继续计时", async () => {
   const run = await start({ maxMinutes: 1, elapsedMs: 60000 - 400, initialPrompt: "等待审批" });
   state.appendEvent(run.task.id, { type: "permission_pending", decisionId: "夹具审批", tool: "Bash" }); await delay(1300);

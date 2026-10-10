@@ -41,6 +41,8 @@ function inside(root, candidate) {
 export function classifyPermission(request, task) {
   const tool = String(request.tool_name || "");
   const input = request.tool_input || {};
+  if (task.reportMcpConfig && request.session_id === task.sessionId &&
+    ["mcp__claude-bridge-report__report", "mcp__claude-bridge-report__receipt", "mcp__claude-bridge-report__inbox", "mcp__claude-bridge-report__ack"].includes(tool)) return { kind: "allow", reason: "当前委派的本地回传工具，具体绑定由回传服务再次核验" };
   const file = String(input.file_path || input.path || input.notebook_path || "");
   const command = String(input.command || "").trim();
   const cwd = path.resolve(task.cwd);

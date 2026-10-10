@@ -42,7 +42,7 @@ export async function observeLocalRecords(controller, { root = MANAGED_ROOT, obs
       const blockingInput = Boolean(next.probe.inputPending || next.probe.draft && next.probe.draftKind !== "orca_ui_composer");
       if (next.probe.stale) emit("binding_stale", `${r.runtimeId}:${r.terminalId}:${next.probe.code || "stale"}`);
       if (next.probe.error) emit("recovery_uncertain", `${r.runtimeId}:${r.terminalId}:${next.probe.error}`);
-      if (next.probe.needsInput) emit("needs_input", `${r.lastInstruction?.requestId}:${next.probe.revision}`);
+      if (next.probe.needsInput) emit("needs_input", `${r.lastInstruction?.requestId}:${next.probe.blocker?.fingerprint || next.probe.revision}`, { kind: next.probe.blocker?.kind || "binding_unknown" });
       const ownedEcho = next.probe.draftEvidence?.source === "bridge_submission_echo";
       if (blockingInput && !ownedEcho) emit("draft_blocked", `${r.terminalId}:${next.probe.draftEvidence?.fingerprint || next.probe.revision || "unknown"}`);
       const confirmedDraft = previous.probe?.draftEvidence?.source === "bridge_submission_echo" || Boolean(r.draftSubmission && r.lastInstruction && r.draftSubmission.requestId === r.lastInstruction.requestId && Date.now() - Date.parse(r.draftSubmission.at || "") < 30000);
@@ -50,7 +50,7 @@ export async function observeLocalRecords(controller, { root = MANAGED_ROOT, obs
       const recordFile = path.join(root, "orca", "会话", `${r.id}.json`), fresh = readJson(recordFile);
       if (fresh?.state === "attached" && fresh.controlRevision === r.controlRevision) {
         fresh.uiDraft = next.probe.uiDraft || null;
-        fresh.terminalBlocker = next.probe.stale ? { kind: "binding_stale", code: next.probe.code || "BINDING_STALE" } : next.probe.error ? { kind: "probe_error", code: next.probe.error } : blockingInput && !ownedEcho ? { kind: "terminal_input", ...(next.probe.draftEvidence || { present: true, source: "unknown" }) } : null;
+        fresh.terminalBlocker = next.probe.stale ? { kind: "binding_stale", code: next.probe.code || "BINDING_STALE" } : next.probe.error ? { kind: "probe_error", code: next.probe.error } : next.probe.blocker && !ownedEcho ? next.probe.blocker : blockingInput && !ownedEcho ? { kind: "terminal_input", ...(next.probe.draftEvidence || { present: true, source: "unknown" }) } : null;
         updateJson(recordFile, (current) => current?.controlRevision === r.controlRevision && current?.state === "attached" ? { ...current, uiDraft: fresh.uiDraft, terminalBlocker: fresh.terminalBlocker } : undefined);
       }
     }
@@ -107,9 +107,13 @@ export async function observeLocalRecords(controller, { root = MANAGED_ROOT, obs
       let handoff; try { handoff = readHandoff(r); } catch { handoff = { invalid: "快照核验失败" }; }
       if (handoff?.invalid) { next.handoffInvalid = handoff.invalid; next.pendingHandoff = null; }
       else if (handoff) {
-        if (!handoff.requiresDecision) emit("stage_delivered", handoff.phaseId, { level: handoff.level, phaseId: handoff.phaseId, requiresDecision: false });
+        if (handoff.reportId && ["blocked", "needs_decision"].includes(handoff.reportStatus)) {
+          enqueueWakeEvent(root, r.id, { type: "needs_input", eventId: handoff.reportId, reportId: handoff.reportId, backend, requestId: handoff.requestId, requiresDecision: true, at: new Date(now).toISOString() });
+          next.pendingHandoff = null;
+        }
+        else if (!handoff.requiresDecision) emit("stage_delivered", handoff.phaseId, { level: handoff.level, phaseId: handoff.phaseId, reportId: handoff.reportId, requiresDecision: false });
         else if (completed && next.pendingHandoff?.revision === handoff.revision && next.pendingHandoff?.snapshot === handoff.snapshot) {
-          emit("stage_delivered", handoff.phaseId, { level: handoff.level, phaseId: handoff.phaseId, requiresDecision: true }); next.pendingHandoff = null;
+          emit("stage_delivered", handoff.phaseId, { level: handoff.level, phaseId: handoff.phaseId, reportId: handoff.reportId, requiresDecision: true }); next.pendingHandoff = null;
           next.handoffVerified = { revision: handoff.revision, snapshot: handoff.snapshot };
         } else next.pendingHandoff = { revision: handoff.revision, snapshot: handoff.snapshot };
         next.handoff = handoff; next.handoffInvalid = null;
@@ -117,7 +121,7 @@ export async function observeLocalRecords(controller, { root = MANAGED_ROOT, obs
       next.handoffSignature = signature;
     }
     next.checkedAt = now; next.retryAfter = null;
-    if (backend === "orca" && next.completionCandidate && !next.pendingHandoff && r.lastInstruction.kind !== "compact") emit("instruction_completed", next.completionCandidate, { level: r.lastInstruction.deliveryLevel || "batch" });
+    if (backend === "orca" && next.completionCandidate && !next.pendingHandoff && r.lastInstruction.kind !== "compact" && !(next.handoff?.reportId && next.handoff.reportStatus !== "progress" && next.handoff.requestId === next.completionCandidate)) emit("instruction_completed", next.completionCandidate, { level: r.lastInstruction.deliveryLevel || "batch" });
     if (previous.faultId) {
       const file = path.join(wakeDir(root, controller), "faults", `${previous.faultId}.json`), fault = readWakeJson(file);
       if (fault?.state === "active") {

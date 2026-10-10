@@ -12,15 +12,16 @@ export function normalizedDirectory(value) {
 export function redactText(text) {
   return String(text).replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/g, "[私钥已隐藏]")
     .replace(/\bBearer\s+[^\s"']+/gi, "Bearer [已隐藏]")
+    .replace(/\bBasic\s+[A-Za-z0-9+/=]+/gi, "Basic [已隐藏]")
     .replace(/\b(?:sk-ant-|sk-proj-|ghp_|github_pat_)[A-Za-z0-9_-]+/g, "[密钥已隐藏]")
     .replace(/\bsshpass\s+-p\s+["']?[^\s"']+/gi, "sshpass -p [已隐藏]")
-    .replace(/([a-z]+:\/\/[^\s\/@:]+:)[^\s\/@]+(@)/gi, "$1[已隐藏]$2")
+    .replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s\/@]+@/gi, "$1[身份已隐藏]@")
     .replace(/\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|API_KEY))(["']?\s*[:=]\s*["']?)([^\s"',;]+)/g, "$1$2[已隐藏]")
     .replace(/\b(password|passwd|api[_-]?key|auth[_-]?token|access[_-]?token|secret|ANTHROPIC_AUTH_TOKEN)(["']?\s*[:=]\s*["']?)([^\s"',;]+)/gi, "$1$2[已隐藏]");
 }
 const hash = (value) => crypto.createHash("sha256").update(value).digest("hex");
 const normalizedText = (text) => String(text || "").replace(/\r\n/g, "\n").trim();
-const systemTaskOrigin = (entry) => entry.origin?.kind === "task-notification" && entry.promptSource === "system" && entry.turnOrigin === "task_notification";
+const systemTaskOrigin = (entry) => entry.origin?.kind === "task-notification" && entry.promptSource === "system" && (entry.turnOrigin === "task_notification" || entry.origin?.producer === "session-task");
 export function taskNotification(entry) {
   const note = entry.attachment || entry.data;
   if (note?.type === "task_notification") return note;
@@ -61,7 +62,7 @@ export function messageOrigin(entry) {
   if (entry.type === "user" && entry.userType === "external" && entry.entrypoint === "cli" && registeredAutomation(entry, text)) return "automation_input";
   if (entry.type === "user" && entry.userType === "external" && entry.entrypoint === "cli" && /^<local-command-stdout>[\s\S]*<\/local-command-stdout>$/.test(text)) return "local_command_result";
   // 兼容 Claude 的完整系统投递包装；普通聊天中引用标签不按通知处理。
-  if (/^Another Claude session sent a message:\s*<teammate-message\s+teammate_id="[^"<>\r\n]+"(?:\s+[^<>]*)?>[\s\S]*<\/teammate-message>\s*$/.test(text)) return "agent_notification";
+  if (entry.userType === "external" && entry.entrypoint === "cli" && /^Another Claude session sent a message:\s*<teammate-message\s+teammate_id="[^"<>\r\n]+"(?:\s+[^<>]*)?>[\s\S]*?<\/teammate-message>(?:\s[\s\S]*)?$/.test(text)) return "agent_notification";
   if (entry.isMeta && /^<(?:teammate-message|task-notification)\b[\s\S]*<\/(?:teammate-message|task-notification)>\s*$/.test(text)) return "agent_notification";
   return entry.type === "user" ? "human_input" : entry.type;
 }
@@ -208,7 +209,7 @@ export function observeInstruction(sessionId, cwd, instruction, saved = {}) {
       }
       if (text) result.text = redactText(`${result.text}${result.text ? "\n" : ""}${text}`).slice(-16000);
       if (!hasTools && text && e.message?.stop_reason === "end_turn") result.completed = true;
-      if (e.isApiErrorMessage || e.error) result.failed = true;
+      if (e.isApiErrorMessage || e.error) { result.failed = true; result.completed = true; }
     }
     if (result.logged && e.type === "user" && Array.isArray(e.message?.content)) {
       const task = e.toolUseResult?.task;
@@ -221,7 +222,7 @@ export function observeInstruction(sessionId, cwd, instruction, saved = {}) {
       }
     }
     // 官方失败事件须明确存在，不用“没有完成”推断失败或求助。
-    if (result.logged && e.type === "system" && e.subtype === "stop_failure") result.failed = true;
+    if (result.logged && e.type === "system" && e.subtype === "stop_failure") { result.failed = true; result.completed = true; }
   } });
   result.cursor = scan.cursor; result.changed = scan.changed; result.gap ||= scan.gap;
   for (const [key, job] of Object.entries(result.background || {}).slice(0, 20)) {
@@ -229,7 +230,8 @@ export function observeInstruction(sessionId, cwd, instruction, saved = {}) {
     const original = readTaskResult(sessionId, cwd, job.agentId, { [key]: job }, 1);
     if (original.taskState === "completed" && original.resultState === "available") finishBackground(result, { taskId: job.taskId, status: "completed" });
   }
-  result.backgroundOutstanding = Boolean(Object.keys(result.background || {}).length);
+  result.backgroundServices = Object.keys(result.background || {}).filter(key => instruction.backgroundRoles?.[key]?.role === "service");
+  result.backgroundOutstanding = Object.keys(result.background || {}).some(key => !result.backgroundServices.includes(key));
   result.hasMore = scan.hasMore && !result.ambiguous; result.awaitingData = scan.awaitingData; result.truncated = false;
   if (scan.changed || result.gap || result.ambiguous) result.completed = false;
   result.revision = hash(JSON.stringify([result.logged, result.started, result.completed, result.failed, result.ambiguous, result.cursor, result.text]));

@@ -58,6 +58,14 @@ test("别名唯一且按主控隔离，操作不使用模糊或最近匹配", ()
   assert.throws(() => management.resolveManagedReference(id, "另一个主控"), /不属于/);
 });
 
+test("确认不再复用后清理自建工作树及已合入分支，保留主目录", () => {
+  const cwd = repository("无复用清理"), controller = "清理主控", task = ended(cwd, controller);
+  const result = management.archiveTask(task.id, controller, "隔离测试结束，没有复用价值", true, true);
+  assert.equal(result.cwdRemoved, true); assert.equal(result.branchRemoved, true);
+  assert.equal(fs.existsSync(task.cwd), false); assert.equal(fs.existsSync(cwd), true);
+  assert.throws(() => git(cwd, "show-ref", "--verify", `refs/heads/${task.branch}`));
+});
+
 test("批量操作单项失败不会重复或丢弃其他结果", async () => {
   const controller_id = "批量主控", queued = crypto.randomUUID(), running = crypto.randomUUID();
   state.writeTask({ id: queued, sessionId: crypto.randomUUID(), controllerId: controller_id, state: "queued" });

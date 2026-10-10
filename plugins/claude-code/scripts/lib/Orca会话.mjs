@@ -1,14 +1,15 @@
 import fs from "node:fs";
+import { prepareReportSession } from "./主动回传.mjs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { MANAGED_ROOT, controllerId, readJson, writeJson, resolveModel, listTasks, readRuntime } from "./managed-state.mjs";
-import { observeInstruction, readHistory, diagnoseCursor, observeHumanActivity, readTaskResult, scanSession, entryText } from "./会话读取.mjs";
+import { observeInstruction, readHistory, diagnoseCursor, observeHumanActivity, readTaskResult, scanSession, entryText, redactText } from "./会话读取.mjs";
 import { effectiveProfile, validateProfile, prepareRecordDocuments, deliveryInstruction } from "./协作策略.mjs";
 import { orcaLaunch, executable as resolveExecutable } from "./平台适配.mjs";
-import { statusResponse } from "./状态响应.mjs";
+import { statusResponse, validateStatusCursor } from "./状态响应.mjs";
 import { pendingWakeEvents, wakeDir } from "./事件队列.mjs";
 import { updateJson } from "./原子文件.mjs";
 
@@ -69,6 +70,18 @@ export function emptyPrompt(lines) {
   return Boolean(prompts.length && /^\s*[❯>]\s*(?:(?:Try|试试|尝试)\s*["“「].*["”」])?\s*$/.test(prompts.at(-1)));
 }
 
+export function classifyTerminal(lines) {
+  const text = lines.join("\n");
+  const choices = lines.filter(s => /^\s*[❯>]?\s*\d+[.)]\s+/.test(s)).map(s => redactText(s.trim()).slice(0, 160)).slice(0, 6);
+  let kind = null;
+  if (/Stage\s*2\s*classifier error|classifier.*(?:unavailable|error|failed)/i.test(text)) kind = "classifier_unavailable";
+  else if (choices.length && /auto mode|API usage|billing|自动模式|计费/i.test(text) && !/Bash command|Read file|permission rule/i.test(text)) kind = "system_notice";
+  else if (choices.length && /Do you want to|Permission rule|requires confirmation|Allow .*|允许|是否.*继续/i.test(text)) kind = "permission_requested";
+  else if (lines.some(s => /^\s*[❯>]\s+\S/.test(s)) && !choices.length && !emptyPrompt(lines)) kind = "draft_present";
+  else if (choices.length) kind = "binding_unknown";
+  return kind ? { kind, source: "terminal_screen", actionable: false, fingerprint: crypto.createHash("sha256").update(text).digest("hex"), options: choices } : null;
+}
+
 function transcriptFile(sessionId) {
   const root = path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude"), "projects");
   let folders; try { folders = fs.readdirSync(root, { withFileTypes: true }); } catch { return null; }
@@ -88,13 +101,14 @@ export async function probeOrcaRecord(r, call = orcaCall) {
   const lines = screen.tail || [];
   const busy = lines.some((line) => /^\s*[✢✳✻✶✽*].*…|(?:Generating|Thinking|Working).*…|esc to interrupt/i.test(line));
   const needsInput = lines.some((line) => /Do you want to|Permission rule .*requires confirmation/i.test(line)) && lines.some((line) => /^\s*[❯>]\s*1\.\s*(?:Yes|Allow)/i.test(line));
+  const blocker = classifyTerminal(lines);
   const draft = typeof screen.draft === "string" ? screen.draft : "";
   const fingerprint = draft ? crypto.createHash("sha256").update(draft).digest("hex") : null;
   const matchesBridge = Boolean(fingerprint && r.lastInstruction?.sentPromptHash === fingerprint);
   const recentInput = Date.now() - Date.parse(r.lastInstruction?.preparedAt || "") < 30000;
   const ownedEcho = Boolean(draft && recentInput && r.lastInstruction?.marker && draft.includes(r.lastInstruction.marker));
-  const pendingInput = !busy && !needsInput && !statusIdentity(lines) && !emptyPrompt(lines);
-  return { busy, needsInput, draft: Boolean(screen.draft), draftKind: "orca_ui_composer", inputPending: pendingInput,
+  const pendingInput = !busy && blocker?.kind === "draft_present" && !statusIdentity(lines);
+  return { busy, needsInput: needsInput || Boolean(blocker && blocker.kind !== "draft_present"), blocker, draft: Boolean(screen.draft), draftKind: "orca_ui_composer", inputPending: pendingInput,
     uiDraft: { present: Boolean(screen.draft), length: draft.length, fingerprint, source: "orca_ui_composer", author: "unknown", submitted: false },
     draftEvidence: { present: Boolean(screen.draft), length: draft.length, fingerprint, source: ownedEcho ? "bridge_submission_echo" : "orca_ui_composer", matchesBridgeRequest: matchesBridge, blocksDispatch: false },
     revision: crypto.createHash("sha256").update(JSON.stringify([busy, needsInput, pendingInput])).digest("hex") };
@@ -151,7 +165,7 @@ export function createOrcaAdapter({ call = orcaCall, root = path.join(MANAGED_RO
   function updateTurn(r, args = {}) {
     if (!r.lastInstruction) return statusResponse({ ...summary(r), turn: null });
     const turn = observe(r.sessionId, r.cwd, r.lastInstruction, r.observation || {});
-    if (turn.logged && !["cancelled", "human_handoff"].includes(r.lastInstruction.terminalState)) r.lastInstruction.state = turn.completed ? "completed" : "logged";
+    if (turn.logged && !["cancelled", "human_handoff"].includes(r.lastInstruction.terminalState)) r.lastInstruction.state = turn.failed ? "failed" : turn.completed ? "completed" : "logged";
     if (turn.failed && !["cancelled", "human_handoff"].includes(r.lastInstruction.terminalState)) r.lastInstruction.state = "failed";
     if (turn.nextUserObserved) r.owner = "human";
     r.observation = turn;
@@ -163,7 +177,7 @@ export function createOrcaAdapter({ call = orcaCall, root = path.join(MANAGED_RO
     const { text, ...short } = turn;
     const unchanged = args.after_revision === r.revision;
     return statusResponse({ ...summary(r), unchanged, turn: unchanged ? null : { ...short, ...(args.include_text ? { text } : {}) },
-      submission: { kind: r.lastInstruction.kind === "compact" ? "command" : "task", state: turn.completed ? "completed" : turn.started ? "started" : turn.logged ? "received" : ["accepted", "started"].includes(r.lastInstruction.state) ? "sent_unconfirmed" : "pending_send",
+      submission: { kind: r.lastInstruction.kind === "compact" ? "command" : "task", state: turn.failed ? "failed" : turn.completed ? "completed" : turn.started ? "started" : turn.logged ? "received" : ["accepted", "started"].includes(r.lastInstruction.state) ? "sent_unconfirmed" : "pending_send",
         logged: Boolean(turn.logged), started: Boolean(turn.started), userUuid: turn.userUuid || null, firstAssistantUuid: turn.firstAssistantUuid || null, requestId: r.lastInstruction.requestId } });
   }
 
@@ -249,11 +263,13 @@ export function createOrcaAdapter({ call = orcaCall, root = path.join(MANAGED_RO
       }
       const model = resolveModel(args.model), sessionId = crypto.randomUUID();
       // --command 由 PowerShell 执行，所有可变参数均使用单引号转义；不拼接任务正文。
-      const launch = orcaLaunch(sessionId, model);
+      const bridgeId = crypto.randomUUID();
+      const reportMcpConfig = prepareReportSession({ id: bridgeId, sessionId, controllerId: master }, { root: path.dirname(root) });
+      const launch = orcaLaunch(sessionId, model, process.platform, reportMcpConfig);
       const response = await call(["terminal", "create", "--worktree", `path:${args.cwd}`, "--title", args.title || "Codex 委派 Claude", "--shell", launch.shell, "--command", launch.command], args.cwd);
       const t = response.result.terminal;
       if (!t?.handle || !t.incarnationId || !response._meta?.runtimeId) throw new Error("Orca 未返回完整终端身份；新建回执不明，请先列出核对");
-      const r = { id: crypto.randomUUID(), controllerId: master, sessionId, cwd: args.cwd, terminalId: t.handle,
+      const r = { id: bridgeId, controllerId: master, sessionId, cwd: args.cwd, terminalId: t.handle, reportMcpConfig,
         incarnationId: t.incarnationId, runtimeId: response._meta.runtimeId, createdByPlugin: true, state: "attached", model,
         coordinationProfile: args.profile || null, createdAt: new Date().toISOString() };
       writeJson(recordPath(r.id), r);
@@ -270,16 +286,54 @@ export function createOrcaAdapter({ call = orcaCall, root = path.join(MANAGED_RO
       else throw new Error("查询需要精确接入id，或当前主控下唯一匹配的session_id＋cwd／request_id；不选择最近会话");
     }
     if (!r || r.controllerId !== master) throw new Error("该 Orca 接入记录不属于当前 Codex 主控；修改操作须用create/attach返回的id");
+    if (args.action === "cleanup") {
+      if (!r.createdByPlugin) throw new Error("既有用户会话默认保留；请使用release交还管理");
+      if (Object.keys(r.retainedServices || {}).length) throw new Error("存在保留的开发服务，确认停止或交接并解除保留后再清理");
+      if (args.no_reuse_confirmed !== true || typeof args.summary !== "string" || !args.summary.trim()) throw new Error("清理须确认没有复用价值，并提供简短交付摘要");
+      const turn = r.lastInstruction && observe(r.sessionId, r.cwd, r.lastInstruction, r.observation || {});
+      if (turn && Object.keys(turn.background || {}).length) throw new Error("后台任务或开发服务仍存在，先确认停止或交接后清理");
+      if (r.state !== "closed" && (turn && (!turn.completed || turn.backgroundOutstanding || turn.changed || turn.gap || turn.ambiguous) || r.cancelRequested || r.owner === "human")) throw new Error("执行、后台或控制状态尚未确认，暂缓清理");
+      const queue = readJson(path.join(root, "队列", `${r.id}.json`)) || [];
+      if (queue.some(i => ["queued", "submitted", "sending", "uncertain", "blocked"].includes(i.state))) throw new Error("尚有未处理队列，暂缓清理");
+      const plan = { id: r.id, sessionId: r.sessionId, terminalId: r.terminalId, closeTerminal: r.state !== "closed", workspaceRetained: true,
+        reason: "此入口只在已有目录创建终端，未创建工作区或分支，因此保留目录与分支" };
+      if (args.dry_run !== false) return { ...plan, dryRun: true };
+      if (r.state !== "closed") {
+        const t = await bound(r), view = await screen(t, r.cwd);
+        const draft = typeof view.draft === "string" ? view.draft : "";
+        const knownEcho = Boolean(draft && turn?.logged && r.lastInstruction?.sentPromptHash === crypto.createHash("sha256").update(draft).digest("hex"));
+        const promptReady = emptyPrompt(view.tail || []);
+        if (draft && !knownEcho || !promptReady) {
+          const blocker = classifyTerminal(view.tail || []);
+          throw new Error(`终端草稿或菜单尚未处理，暂缓清理；输入区就绪=${promptReady}，界面草稿长度=${draft.length}，已提交回显=${knownEcho}，分类=${blocker?.kind || "unknown"}`);
+        }
+        const checked = await identity(t, r.cwd);
+        if (checked.sessionId !== r.sessionId) throw new Error("终端已切换为其他Claude会话，暂缓清理");
+        await call(["terminal", "close", "--terminal", r.terminalId], r.cwd);
+      }
+      r.state = "closed"; r.archivedAt = new Date().toISOString(); r.archive = { summary: redactText(args.summary).slice(0, 1500), noReuse: true, workspaceRetained: true };
+      writeJson(recordPath(r.id), r);
+      return { ...plan, archived: true, terminalClosed: true, historyRetained: true, message: "已移除执行终端并退役调度记录；保留历史与验收依据" };
+    }
     if (r.state !== "attached") throw new Error("接入已释放或关闭，须重新接入");
+    if (args.after_cursor !== undefined) args = { ...args, after_revision: validateStatusCursor(args.after_cursor, r.id, "task_status", r.incarnationId) };
     const queueFile = path.join(root, "队列", `${r.id}.json`);
+    // 按被查询的逻辑请求返回回执；排队项不借用上一轮的日志证明。
+    if (args.action === "confirm_submission" && args.request_id && args.request_id !== r.lastInstruction?.requestId) {
+      const item = (readJson(queueFile) || []).find((i) => i.requestId === args.request_id);
+      return { id: r.id, sessionId: r.sessionId, submission: { requestId: args.request_id,
+        state: item?.state || "not_found", orcaRequestId: item?.orcaRequestId || null,
+        logged: false, started: false, userUuid: null, firstAssistantUuid: null },
+        previousRequestId: r.lastInstruction?.requestId || null, modelCalls: 0 };
+    }
     if (args.action === "cancel_queued") {
       const items = readJson(queueFile) || [], item = items.find((i) => i.requestId === args.queued_request_id);
-      if (!item || !["queued", "cancelled"].includes(item.state)) throw new Error("只可取消尚未发送的精确队列项；已发送或回执不明须核对原请求");
+      if (!item || !["queued", "blocked", "cancelled"].includes(item.state)) throw new Error("只可取消尚未发送的精确队列项；已发送或回执不明须核对原请求");
       item.state = "cancelled"; item.cancelledAt ||= new Date().toISOString(); writeJson(queueFile, items);
       return { id: r.id, requestId: item.requestId, state: "cancelled", inputMayHaveBeenSent: false };
     }
     if (args.action === "queue") {
-      const items = (readJson(queueFile) || []).map((item) => item.requestId === r.lastInstruction?.requestId && r.observation?.completed ? { ...item, state: "completed", commandCompleted: r.lastInstruction.kind === "compact", businessDelivered: r.lastInstruction.kind !== "compact" } : item);
+      const items = (readJson(queueFile) || []).map((item) => item.requestId === r.lastInstruction?.requestId && r.observation?.completed ? { ...item, state: r.observation.failed ? "failed" : "completed", commandCompleted: !r.observation.failed && r.lastInstruction.kind === "compact", businessDelivered: !r.observation.failed && r.lastInstruction.kind !== "compact" } : item);
       const count = Math.min(Math.max(Number(args.limit) || 10, 1), 30), cap = Math.min(Math.max(Number(args.max_chars) || 2400, 1), 16000); let remaining = cap;
       return { id: r.id, queue: items.slice(0, count).map(({ prompt, ...item }) => { const text = args.include_text ? redactText(prompt).slice(0, remaining) : undefined; remaining -= text?.length || 0; return { ...item, ...(text === undefined ? {} : { text }) }; }), total: items.length, truncated: items.length > count, message: "排队与提交回执不表示开工；命令完成与业务交付分别核验" };
     }
@@ -301,14 +355,15 @@ export function createOrcaAdapter({ call = orcaCall, root = path.join(MANAGED_RO
       if (uncertain) {
         const proof = r.lastInstruction?.requestId === uncertain.requestId && observe(r.sessionId, r.cwd, r.lastInstruction, r.observation || {});
         if (!proof?.logged || !proof.userUuid || proof.changed || proof.gap || proof.ambiguous) return { id: r.id, needsAttention: true, requestId: uncertain.requestId, message: "排队输入回执不明，只核对confirm_submission，不重发" };
-        uncertain.state = proof.completed ? "completed" : "submitted"; uncertain.reconciledUserUuid = proof.userUuid; uncertain.transportReceiptLost = true;
+        uncertain.state = proof.failed ? "failed" : proof.completed ? "completed" : "submitted"; uncertain.reconciledUserUuid = proof.userUuid; uncertain.transportReceiptLost = true;
         writeJson(queueFile, items);
       }
-      const item = items.find((i) => i.state === "queued");
+      const item = items.find((i) => ["queued", "blocked"].includes(i.state));
       if (!item) return { id: r.id, unchanged: true, queueEmpty: true };
+      if (item.state === "blocked") return { id: r.id, needsAttention: true, requestId: item.requestId, submission: { state: "blocked" }, reason: "相同发送前错误已发生两次，停止自动重试；核对后取消此未发送项或修复原因", modelCalls: 0 };
       if (item.retryAfter > Date.now()) return { id: r.id, submission: { state: "queued" }, retryAfter: item.retryAfter, modelCalls: 0 };
       const current = r.lastInstruction && observe(r.sessionId, r.cwd, r.lastInstruction, r.observation || {});
-      if (current?.completed) for (const previous of items) if (previous.requestId === r.lastInstruction.requestId && previous.state === "submitted") { previous.state = "completed"; previous.completedAt = new Date().toISOString(); previous.commandCompleted = r.lastInstruction.kind === "compact"; previous.businessDelivered = r.lastInstruction.kind !== "compact"; }
+      if (current?.completed) for (const previous of items) if (previous.requestId === r.lastInstruction.requestId && previous.state === "submitted") { previous.state = current.failed ? "failed" : "completed"; previous.completedAt = new Date().toISOString(); previous.commandCompleted = !current.failed && r.lastInstruction.kind === "compact"; previous.businessDelivered = !current.failed && r.lastInstruction.kind !== "compact"; }
       if (r.owner === "human" || current?.backgroundOutstanding || current && !current.completed || current?.nextUserObserved || r.cancelRequested) return { id: r.id, submission: { state: "queued" }, waitingFor: "当前主轮、实际后台任务或人类指令", modelCalls: 0 };
       if (pendingWakeEvents(wakeDir(path.dirname(root), master)).some((e) => e.taskId === r.id && e.requestId === r.lastInstruction?.requestId && ["instruction_completed", "stage_delivered"].includes(e.type))) return { id: r.id, submission: { state: "queued" }, waitingFor: "上一批交付尚未由主控接住", modelCalls: 0 };
       // 先记录发送意图；进程中断后不能自动重放。
@@ -318,7 +373,14 @@ export function createOrcaAdapter({ call = orcaCall, root = path.join(MANAGED_RO
           request_id: item.requestId, prompt: item.prompt, process_docs: item.processDocs, delivery_level: item.deliveryLevel }, master, transaction);
         item.state = "submitted"; item.submittedAt = new Date().toISOString(); item.orcaRequestId = result.receipt?.prompt?.requestId || null;
         writeJson(queueFile, items); return { ...result, queuedRequestId: item.requestId };
-      } catch (error) { item.state = transaction.inputMayHaveBeenSent ? "uncertain" : "queued"; item.retryAfter = transaction.inputMayHaveBeenSent ? null : Date.now() + 5000; writeJson(queueFile, items); throw error; }
+      } catch (error) {
+        const reason = error.code || crypto.createHash("sha256").update(error.message).digest("hex").slice(0, 16);
+        item.repeatedFailures = item.lastFailure === reason ? (item.repeatedFailures || 0) + 1 : 1;
+        item.lastFailure = reason;
+        item.state = transaction.inputMayHaveBeenSent ? "uncertain" : item.repeatedFailures >= 2 ? "blocked" : "queued";
+        item.retryAfter = item.state === "queued" ? Date.now() + 5000 : null;
+        writeJson(queueFile, items); throw error;
+      }
     }
     if (args.action === "release") { r.controlRevision = (r.controlRevision || 0) + 1; r.state = "released"; writeJson(recordPath(r.id), r); return { ...summary(r), terminalKeptAlive: true }; }
     if (args.action === "rebind") return rebind(r, args);
@@ -409,7 +471,7 @@ export function createOrcaAdapter({ call = orcaCall, root = path.join(MANAGED_RO
     }
     if (args.action === "cancel") {
       await call(["terminal", "send", "--terminal", r.terminalId, "--interrupt"], r.cwd);
-      r.controlRevision = (r.controlRevision || 0) + 1; r.cancelRequested = true; r.owner = "human"; writeJson(recordPath(r.id), r);
+      r.controlRevision = (r.controlRevision || 0) + 1; r.cancelRequested = true; r.controlPauseReason = "controller_cancel"; writeJson(recordPath(r.id), r);
       return { ...summary(r), cancellation: "requested_unconfirmed", message: "已请求中断；尚未证明后台工具、子代理和人类队列全部停止，自动派发已暂停" };
     }
     if (args.action === "transcript") return readHistory({ ...args, cursor: args.cursor || { offset: r.lastInstruction?.baseline || 0 }, roles: ["assistant"], session_id: r.sessionId, cwd: r.cwd });
@@ -452,7 +514,8 @@ export function createOrcaAdapter({ call = orcaCall, root = path.join(MANAGED_RO
     if (r.owner === "human" || r.cancelRequested) throw new Error("会话由人类控制或取消尚未确认，先明确交回控制权");
     if (r.observation?.backgroundOutstanding) throw new Error("主轮结束但后台任务范围尚未确认，不继续派发");
     if (!args.prompt || typeof args.prompt !== "string" || args.prompt.length > 50000 || (isCommand ? !/^\/compact(?:\s|$)/.test(args.prompt) : /^[\s]*\//.test(args.prompt)) || /[\u0000-\u0008\u001b]/.test(args.prompt)) throw new Error("send须为普通正文；command仅支持/compact；不接受终端控制字符");
-    if (r.lastInstruction && !["completed", "cancelled", "interrupted_by_human"].includes(updateTurn(r).lastInstruction.state)) throw new Error("上一条指令尚未确认完成，先读取并核对，不能重复派发");
+    if (r.lastInstruction && !["completed", "failed", "cancelled", "interrupted_by_human"].includes(updateTurn(r).lastInstruction.state)) throw new Error("上一条指令尚未确认完成，先读取并核对，不能重复派发");
+    if (r.observation?.changed || r.observation?.gap || r.observation?.ambiguous) throw new Error("日志证据不完整，保持原请求，不自动续接");
     if (r.owner === "human" || r.observation?.nextUserObserved) throw new Error("发现新增人类输入，保留管理；先理解新增意图并确认空闲后接续");
     const checked = await identity(t, r.cwd);
     if (checked.sessionId !== r.sessionId) throw new Error("Claude 实际会话 ID 已变化，停止发送，须按新 ID 重新接入");
@@ -464,7 +527,7 @@ export function createOrcaAdapter({ call = orcaCall, root = path.join(MANAGED_RO
     r.observation = null;
     r.humanActivity = null; r.managementCursor = { offset: r.lastInstruction.baseline };
     const docs = args.process_docs === false || isCommand ? null : prepareRecordDocuments(r, args.prompt);
-    const sentPrompt = args.prompt + `\n\n${marker}` + (docs ? deliveryInstruction(r, docs) : "");
+    const sentPrompt = args.prompt + `\n\n${marker}` + (docs ? deliveryInstruction(r, docs, { root: path.dirname(root) }) : "");
     r.lastInstruction.kind = isCommand ? "compact" : "task";
     const registrationFile = path.join(path.dirname(root), "automation", `${r.sessionId}.json`);
     const registrations = readJson(registrationFile) || [];

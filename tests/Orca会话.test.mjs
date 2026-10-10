@@ -19,7 +19,7 @@ function fixture() {
     else if (key === "terminal show") result = { terminal: t };
     else if (key === "terminal read") result = { terminal: { tail: state.screen, draft: state.draft, source: "screen", nextCursor: "1" } };
     else if (key === "terminal wait") result = { wait: { satisfied: state.idle } };
-    else if (key === "terminal create") { state.launches++; result = { terminal: t }; }
+    else if (key === "terminal create") { state.launches++; state.session = value("--command").match(/--session-id '([0-9a-f-]{36})'/)?.[1] || state.session; result = { terminal: t }; }
     else if (key === "terminal close") result = {};
     else if (key === "terminal send") {
       if (args.includes("--wait-submit") && state.sendError) throw Object.assign(new Error("输入发送后回执丢失"), { code:"TRANSPORT_FAILED" });
@@ -30,10 +30,70 @@ function fixture() {
     } else throw new Error(`未预期调用：${key}`);
     return { ok: true, result, _meta: { runtimeId: state.runtime } };
   };
-  const api = createOrcaAdapter({ call, root, observe: () => ({ logged: state.logged, completed: state.completed, text: state.text }) });
+  const api = createOrcaAdapter({ call, root, observe: () => ({ logged: state.logged, completed: state.completed, failed: state.failed, text: state.text }) });
   const attach = (extra = {}) => api({ action: "attach", cwd, session_id: session, idle_confirmed: true, controller_id: "主控一", request_id: "接入一", ...extra });
   return { root, cwd, session, calls, t, state, api, attach };
 }
+
+test("确认排队请求不返回旧轮回执，不存在的请求明确返回未找到", async () => {
+  const f = fixture(), r = await f.attach();
+  await f.api({ action: "send", id: r.id, controller_id: "主控一", request_id: "请求甲", prompt: "任务甲", process_docs: false });
+  f.state.logged = true; f.state.completed = true;
+  await f.api({ action: "enqueue", id: r.id, controller_id: "主控一", request_id: "请求乙", prompt: "任务乙", process_docs: false });
+  const b = await f.api({ action: "confirm_submission", id: r.id, controller_id: "主控一", request_id: "请求乙" });
+  assert.equal(b.submission.requestId, "请求乙"); assert.equal(b.submission.state, "queued"); assert.equal(b.submission.logged, false);
+  const missing = await f.api({ action: "confirm_submission", id: r.id, controller_id: "主控一", request_id: "不存在" });
+  assert.equal(missing.submission.state, "not_found"); assert.equal(missing.submission.userUuid, null);
+});
+
+test("明确失败终态允许新的续接请求，失败回执不冒称成功", async () => {
+  const f = fixture(), r = await f.attach();
+  await f.api({ action: "send", id: r.id, controller_id: "主控一", request_id: "失败轮", prompt: "原任务", process_docs: false });
+  f.state.logged = true; f.state.failed = true; f.state.completed = true;
+  const failed = await f.api({ action: "confirm_submission", id: r.id, controller_id: "主控一", request_id: "失败轮" });
+  assert.equal(failed.submission.state, "failed");
+  await f.api({ action: "send", id: r.id, controller_id: "主控一", request_id: "续接轮", prompt: "保留改动，继续处理", process_docs: false });
+  assert.equal(f.calls.filter(c => c.includes("--wait-submit")).length, 2);
+});
+
+test("两次相同发送前故障停止重试，后续任务不越过阻塞项", async () => {
+  const f = fixture(), r = await f.attach();
+  await f.api({ action: "enqueue", id: r.id, controller_id: "主控一", request_id: "阻塞项", prompt: "任务", process_docs: false });
+  f.state.idle = false;
+  await assert.rejects(f.api({ action: "dispatch_queue", id: r.id, controller_id: "主控一", request_id: "故障一" }));
+  const file = path.join(f.root, "队列", r.id + ".json"), items = JSON.parse(fs.readFileSync(file)); items[0].retryAfter = 0; fs.writeFileSync(file, JSON.stringify(items), "utf8");
+  await assert.rejects(f.api({ action: "dispatch_queue", id: r.id, controller_id: "主控一", request_id: "故障二" }));
+  await f.api({ action: "enqueue", id: r.id, controller_id: "主控一", request_id: "后续项", prompt: "后续", process_docs: false });
+  f.state.idle = true;
+  const result = await f.api({ action: "dispatch_queue", id: r.id, controller_id: "主控一", request_id: "故障三" });
+  assert.equal(result.submission.state, "blocked"); assert.equal(f.calls.some(c => c.includes("--wait-submit")), false);
+});
+
+test("清理只处理自建会话，保留原目录且真实移除终端", async () => {
+  const f = fixture(), attached = await f.attach();
+  await assert.rejects(f.api({ action: "cleanup", id: attached.id, controller_id: "主控一", request_id: "拒绝清理原会话", no_reuse_confirmed: true, summary: "保留用户会话", dry_run: false }), /既有用户会话/);
+  const created = await f.api({ action: "create", cwd: f.cwd, controller_id: "主控一", request_id: "清理验证创建" });
+  const result = await f.api({ action: "cleanup", id: created.id, controller_id: "主控一", request_id: "清理验证执行", no_reuse_confirmed: true, summary: "验证完成", dry_run: false });
+  assert.equal(result.terminalClosed, true); assert.equal(result.workspaceRetained, true); assert.equal(fs.existsSync(f.cwd), true);
+  assert.equal(f.calls.filter(c => c[1] === "close").length, 1);
+});
+
+test("清理保留未知草稿，只忽略已有日志证明的精确派工回显", async () => {
+  const f = fixture();
+  const created = await f.api({ action: "create", cwd: f.cwd, controller_id: "主控一", request_id: "回显验证创建" });
+  await f.api({ action: "send", id: created.id, controller_id: "主控一", request_id: "回显任务", prompt: "测试任务", process_docs: false });
+  f.state.logged = true; f.state.completed = true;
+  const args = { action: "cleanup", id: created.id, controller_id: "主控一", no_reuse_confirmed: true, summary: "无需复用", dry_run: false };
+  f.state.draft = "用户未发送文字";
+  await assert.rejects(f.api({ ...args, request_id: "保留草稿" }), /界面草稿长度/);
+  assert.equal(f.calls.some(c => c[1] === "close"), false);
+  const record = JSON.parse(fs.readFileSync(path.join(f.root, "会话", created.id + ".json"), "utf8"));
+  f.state.draft = "已派工回显";
+  record.lastInstruction.sentPromptHash = crypto.createHash("sha256").update(f.state.draft).digest("hex");
+  fs.writeFileSync(path.join(f.root, "会话", created.id + ".json"), JSON.stringify(record), "utf8");
+  const result = await f.api({ ...args, request_id: "清理已提交回显" });
+  assert.equal(result.terminalClosed, true);
+});
 
 test("指令可持久排队，未发送时不声称开工；派发后不重复发送", async () => {
   const f = fixture(), record = await f.attach();

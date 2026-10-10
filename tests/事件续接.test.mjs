@@ -14,6 +14,10 @@ process.env.CC_PLUGIN_CODEX_DISABLE_NOTIFICATIONS = "1";
 const state = await import("../plugins/claude-code/scripts/lib/managed-state.mjs");
 const queue = await import("../plugins/claude-code/scripts/lib/事件队列.mjs");
 const wake = await import("../plugins/claude-code/scripts/lib/事件续接.mjs");
+test("PID存在不代表观察器身份，其他命令及不可核验状态均不就绪", () => {
+  assert.equal(wake.wakeWorkerIdentity(process.pid, { run: () => "node unrelated-worker.mjs" }), false);
+  assert.equal(wake.wakeWorkerIdentity(process.pid, { run: () => { throw Error("不可查询"); } }), false);
+});
 const line = (type, turn_id) => JSON.stringify({ type: "event_msg", payload: { type, turn_id } }) + "\n";
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 function fixture(enabled = true) {

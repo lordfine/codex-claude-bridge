@@ -50,7 +50,7 @@ export function ipcEndpoints(id) {
   return result;
 }
 
-export function orcaLaunch(sessionId, model, platform = process.platform) {
+export function orcaLaunch(sessionId, model, platform = process.platform, mcpConfig = null) {
   const quote = platform === "win32" ? (s) => `'${String(s).replaceAll("'", "''")}'` : shellQuote;
-  return { shell: platform === "win32" ? "pwsh.exe" : "/bin/zsh", command: `${platform === "win32" ? "claude" : quote(executable("claude"))} --session-id ${quote(sessionId)}${model ? ` --model ${quote(model)}` : ""}` };
+  return { shell: platform === "win32" ? "pwsh.exe" : "/bin/zsh", command: `${platform === "win32" ? "claude" : quote(executable("claude"))} --session-id ${quote(sessionId)}${model ? ` --model ${quote(model)}` : ""}${mcpConfig ? ` --mcp-config ${quote(mcpConfig)} --allowedTools ${quote("mcp__claude-bridge-report__report,mcp__claude-bridge-report__receipt,mcp__claude-bridge-report__inbox,mcp__claude-bridge-report__ack")}` : ""}` };
 }

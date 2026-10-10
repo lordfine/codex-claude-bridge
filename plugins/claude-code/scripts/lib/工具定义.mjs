@@ -1,4 +1,5 @@
 // 当前公开 MCP 工具定义；历史短咨询接口不属于本项目。
+const STATUS_CURSOR = { type: "object", properties: { kind: { type: "string" }, targetId: { type: "string" }, generation: { type: "string" }, revision: { type: "string" } }, required: ["kind", "targetId", "generation", "revision"], additionalProperties: false };
 const SETUP_TOOL = {
   name: "setup",
   description:
@@ -16,11 +17,13 @@ const SETUP_TOOL = {
 };
 
 const MANAGED_TOOLS = [
-  { name: "delegate_overview", description: "一次读取主控的原生与Orca短进度，包含执行线、会话、工作区、交付快照和暂停待办。无变化结束模型轮；force仅用于用户主动查询。", inputSchema: { type: "object", properties: { controller_id: { type: "string" }, after_revision: { type: "string" }, limit: { type: "integer", minimum: 1, maximum: 50 } }, additionalProperties: false } },
+  { name: "delegate_overview", description: "一次读取主控的原生与Orca短进度，包含执行线、会话、工作区、交付快照和暂停待办。无变化结束模型轮；force仅用于用户主动查询。", inputSchema: { type: "object", properties: { controller_id: { type: "string" }, after_cursor: STATUS_CURSOR, after_revision: { type: "string" }, limit: { type: "integer", minimum: 1, maximum: 50 } }, additionalProperties: false } },
   {
     name: "delegate_coordination", description: "读取或设置主控的低/中/高协作档位，默认 medium；可逐任务覆盖。prepare 创建忽略 Git 的过程记录；snapshot 核对实际工作目录；handoff 只返回已核验短交付单。普通进度不调用模型，重大异常和需要决定的交付即时处理。",
     inputSchema: { type: "object", properties: {
-      action: { type: "string", enum: ["status", "configure", "profile", "prepare", "snapshot", "handoff"] },
+        action: { type: "string", enum: ["status", "configure", "profile", "prepare", "snapshot", "handoff", "report", "evidence", "evidence_status", "background_role"] },
+        request_id: { type: "string" }, evidence_id: { type: "string" }, text: { type: "string", maxLength: 3000 }, background_id: { type: "string" }, role: { type: "string", enum: ["service", "work", "released"] }, reason: { type: "string" },
+        report_id: { type: "string", description: "读取指定不可变回传，避免用最新交付冒充旧事件结果" },
       controller_id: { type: "string" }, task_id: { type: "string" }, backend: { type: "string", enum: ["native", "orca"] },
       profile: { type: "string", enum: ["low", "medium", "high", "inherit"] }, deep_effort: { type: "string", enum: ["inherit", "low", "medium", "high", "xhigh", "max", "ultra"] }, task_text: { type: "string" }
     }, required: ["action"], additionalProperties: false }
@@ -35,7 +38,8 @@ const MANAGED_TOOLS = [
   {
     name: "delegate_orca", description: "管理Orca原生Claude会话。主会话交付正文用action=transcript＋接入id，默认仅本次指令的助手回复；历史用history，消息limit与正文max_chars分别限额。task_result仅用于已登记的子代理ID，不能用它读取主会话正文。enqueue保存普通指令或/compact，queue查顺序，空闲后本地调度推进；accepted不等于开工。status用after_revision去重，read的屏幕游标独立。取消请求不证明全部停止；仍不提供Orca自动合并与统一预算。",
     inputSchema: { type: "object", properties: {
-      action: { type: "string", enum: ["list", "create", "attach", "send", "command", "enqueue", "queue", "cancel_queued", "dispatch_queue", "task_result", "status", "read", "wait", "release", "close", "takeover", "cancel", "transcript", "history", "diagnose", "repair_cursor", "human_activity", "rebind", "submit_draft", "confirm_submission"] },
+        action: { type: "string", enum: ["list", "create", "attach", "send", "command", "enqueue", "queue", "cancel_queued", "dispatch_queue", "task_result", "status", "read", "wait", "release", "close", "cleanup", "takeover", "cancel", "transcript", "history", "diagnose", "repair_cursor", "human_activity", "rebind", "submit_draft", "confirm_submission"] },
+        no_reuse_confirmed: { type: "boolean", description: "主控确认连接器创建的会话已无复用价值" }, dry_run: { type: "boolean", description: "cleanup默认仅预览，false执行" }, summary: { type: "string", description: "cleanup保留的简短交付摘要" },
       queued_request_id: { type: "string", description: "cancel_queued专用：尚未发送的排队项原request_id" },
       task_id: { type: "string", description: "task_result专用：当前Claude会话中已经登记的原后台任务或子代理ID" },
       controller_id: { type: "string" }, cwd: { type: "string" }, id: { type: "string", description: "桥接接入记录UUID，即create/attach/rebind返回的id；绝不能传Claude session_id或terminal_id。status/read/wait/send均用此id。" },
@@ -43,7 +47,7 @@ const MANAGED_TOOLS = [
       request_id: { type: "string" }, title: { type: "string" }, model: { type: "string" }, prompt: { type: "string" },
       draft_hash: { type: "string" }, draft_confirmed: { type: "boolean" }, delivery_level: { type: "string", enum: ["subtask", "milestone", "batch", "review", "final"] },
       profile: { type: "string", enum: ["low", "medium", "high"] }, process_docs: { type: "boolean" }, include_text: { type: "boolean" }, stop_confirmed: { type: "boolean" },
-      force: { type: "boolean" }, after_revision: { type: "string" }, screen_revision: { type: "string" }, max_chars: { type: "integer" },
+      force: { type: "boolean" }, after_cursor: STATUS_CURSOR, after_revision: { type: "string" }, screen_revision: { type: "string" }, max_chars: { type: "integer" },
       timeout_ms: { type: "integer", minimum: 1, maximum: 60000 }, cursor: { type: ["string", "object"] },
       limit: { type: "integer", minimum: 1, maximum: 300 }, close_attached_confirmed: { type: "boolean" }
     }, required: ["action"], additionalProperties: false }
@@ -158,7 +162,7 @@ const MANAGED_TOOLS = [
       workflow_id: { type: "string" }, completed: { type: "boolean" }, include_archived: { type: "boolean" },
       query: { type: "string" }, limit: { type: "integer" }, offset: { type: "integer" },
       alias: { type: "string" }, prompt: { type: "string" }, request_id: { type: "string" },
-      immediate: { type: "boolean" }, reconnect: { type: "boolean" }, cleanup: { type: "boolean" }, summary: { type: "string" }
+      immediate: { type: "boolean" }, reconnect: { type: "boolean" }, cleanup: { type: "boolean" }, no_reuse_confirmed: { type: "boolean", description: "归档时确认不再复用，可清理已合入的自建分支" }, summary: { type: "string" }
     }, required: ["action"], additionalProperties: false }
   },
   {

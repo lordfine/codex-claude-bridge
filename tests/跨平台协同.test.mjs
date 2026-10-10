@@ -21,6 +21,7 @@ test("完整子代理包装继续读取，普通引用仍是人类输入", () =>
   const id = crypto.randomUUID(), cwd = root, folder = path.join(process.env.CLAUDE_CONFIG_DIR, "projects", "会话"); fs.mkdirSync(folder, { recursive: true });
   const entry = (type, text) => ({ type, sessionId: id, cwd, uuid: crypto.randomUUID(), message: { content: [{ type: "text", text }], stop_reason: type === "assistant" ? "end_turn" : null } });
   const rows = [entry("user", "任务 <bridge-instruction:测试>"), entry("assistant", "前一轮"), entry("user", 'Another Claude session sent a message:\n<teammate-message teammate_id="检查员" color="green">已完成检查</teammate-message>'), entry("assistant", "最新交付")];
+  Object.assign(rows[2], { userType: "external", entrypoint: "cli" });
   const file = path.join(folder, `${id}.jsonl`); fs.writeFileSync(file, rows.map(JSON.stringify).join("\n") + "\n");
   const result = reader.observeInstruction(id, cwd, { marker: "<bridge-instruction:测试>" });
   assert.equal(result.nextUserObserved, undefined); assert.equal(result.completed, true); assert.match(result.text, /最新交付/); assert.equal(result.cursor.offset, fs.statSync(file).size);

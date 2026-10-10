@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { MANAGED_ROOT, controllerId, readTask, readRuntime } from "./managed-state.mjs";
 import { wakeDir, readWakeJson, writeWakeJson, pendingWakeEvents, codexActivity, acknowledgeWakeEvents, codexTokenTotals, codexRecordedEffort, enqueueWakeEvent } from "./事件队列.mjs";
@@ -17,6 +17,16 @@ const WORKER = fileURLToPath(new URL("../事件续接进程.mjs", import.meta.ur
 const SERVER = fileURLToPath(new URL("../claude-mcp-server.mjs", import.meta.url));
 const PLUGIN = fileURLToPath(new URL("../../", import.meta.url));
 export function wakeAlive(pid) { if (!pid) return false; try { process.kill(Number(pid), 0); return true; } catch (error) { return error.code === "EPERM"; } }
+
+export function wakeWorkerIdentity(pid, { run = execFileSync, platform = process.platform } = {}) {
+  if (!Number.isSafeInteger(Number(pid)) || Number(pid) <= 0) return false;
+  try {
+    const output = platform === "win32"
+      ? run("powershell.exe", ["-NoProfile", "-Command", `[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); (Get-CimInstance Win32_Process -Filter 'ProcessId=${Number(pid)}').CommandLine`], { encoding: "utf8", windowsHide: true, timeout: 5000, stdio: ["ignore", "pipe", "pipe"] })
+      : run("/bin/ps", ["-p", String(pid), "-o", "args="], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "pipe"] });
+    return String(output).replaceAll("\\", "/").includes(WORKER.replaceAll("\\", "/"));
+  } catch { return false; }
+}
 
 export async function readCodexThread(threadId, cwd) {
   if (!UUID.test(threadId)) throw new Error("需要精确 Codex 会话 ID");
@@ -54,7 +64,7 @@ export async function ensureWakeWorker(controller) {
   if (!config?.enabled) return { state: "disabled", ready: false };
   const owner = readWakeJson(path.join(folder, "runner.lock", "owner.json"));
   let child, launchError;
-  if (!wakeAlive(owner?.pid)) {
+  if (!wakeAlive(owner?.pid) || owner?.worker && !wakeWorkerIdentity(owner.pid)) {
     const log = fs.openSync(path.join(folder, "worker.log"), "a");
     child = spawn(process.execPath, [WORKER, controller], { detached: true, windowsHide: true,
       env: process.env, stdio: ["ignore", log, log] }); fs.closeSync(log);
@@ -63,7 +73,7 @@ export async function ensureWakeWorker(controller) {
   const until = Date.now() + 5000;
   do {
     const current = readWakeJson(path.join(folder, "runner.lock", "owner.json")), health = readWakeJson(path.join(folder, "observer-health.json"));
-    if (wakeAlive(current?.pid) && health?.pid === current.pid && health.phase !== "stopped" && Date.now() - Date.parse(health.heartbeatAt) < 20000) return { state: "observing", ready: true, pid: current.pid, heartbeatAt: health.heartbeatAt };
+    if (wakeAlive(current?.pid) && health?.pid === current.pid && health.phase !== "stopped" && Date.now() - Date.parse(health.heartbeatAt) < 20000 && wakeWorkerIdentity(current.pid)) return { state: "observing", ready: true, pid: current.pid, heartbeatAt: health.heartbeatAt };
     if (launchError) return { state: "launch_failed", ready: false, diagnostic: launchError };
     await new Promise((resolve) => setTimeout(resolve, 100));
   } while (Date.now() < until);
@@ -74,18 +84,20 @@ export function wakeStatus(controller) {
   const folder = wakeDir(MANAGED_ROOT, controller), config = readWakeJson(path.join(folder, "config.json"));
   const runtime = readWakeJson(path.join(folder, "runtime.json")) || {};
   const health = readWakeJson(path.join(folder, "observer-health.json")), attention = readWakeJson(path.join(folder, "attention.json"));
+  const owner = readWakeJson(path.join(folder, "runner.lock", "owner.json"));
+  const identityVerified = Boolean(owner?.pid && health?.pid === owner.pid && wakeAlive(owner.pid) && wakeWorkerIdentity(owner.pid));
   const faults = schedulerFaults(folder), fault = runtime.faultId && UUID.test(runtime.faultId) ? readWakeJson(path.join(folder, "faults", `${runtime.faultId}.json`)) : null;
   return { controllerId: controller, enabled: config?.enabled || false, targetThreadId: config?.targetThreadId || null,
     effectiveState: !config?.enabled ? "disabled" : runtime.paused ? runtime.faultId ? "paused_fault" : "paused" : runtime.activeRunId ? "continuing" : "observing_or_starting",
     nextAction: runtime.faultId ? "diagnose核对当前故障，然后resolve_fault；enable不会解除故障" : runtime.paused ? "inspect核对当前CLI运行，再resolve" : "核对心跳与交付事件，不把启用当成功回执",
     cwd: config?.cwd || null, pending: pendingWakeEvents(folder).length,
-    workerAlive: wakeAlive(readWakeJson(path.join(folder, "runner.lock", "owner.json"))?.pid),
-    workerReady: Boolean(health && wakeAlive(health.pid) && health.phase !== "stopped" && Date.now() - Date.parse(health.heartbeatAt) < 20000),
+    workerAlive: identityVerified,
+    workerReady: Boolean(identityVerified && health.phase !== "stopped" && Date.now() - Date.parse(health.heartbeatAt) < 20000),
     diagnosticPaths: { runtime: path.join(folder, "runtime.json"), workerLog: path.join(folder, "worker.log"), faults: path.join(folder, "faults"), runs: path.join(folder, "runs") },
     paused: Boolean(runtime.paused), reason: runtime.reason || null, activeRunId: runtime.activeRunId || null,
     lastRun: runtime.lastRun?.id ? (() => { const actual = readWakeJson(path.join(folder, "runs", `${runtime.lastRun.id}.json`)); return actual ? { ...runtime.lastRun, state: actual.state, summary: actual.state === "acknowledged" ? "已人工核对并处理该批事件；原执行诊断保留" : actual.state === "retry_requested" ? "已申请重试，等待主控空闲" : actual.summary, originalSummary: actual.summary, resolution: actual.resolution || null, diagnosticCategory: actual.diagnostic?.category || null } : runtime.lastRun; })() : null,
     retry: runtime.retryAfter ? { reason: "Codex会话写入器占用，事件保留等待", retryAfter: runtime.retryAfter, attempts: runtime.busyRetries || 0 } : null,
-    observerHealth: health ? { ...health, stale: !wakeAlive(health.pid) || health.phase === "stopped" || Date.now() - Date.parse(health.heartbeatAt) > 20000 } : { phase: "unverified", stale: true },
+    observerHealth: health ? { ...health, identityVerified, stale: !identityVerified || health.phase === "stopped" || Date.now() - Date.parse(health.heartbeatAt) > 20000 } : { phase: "unverified", stale: true },
     currentFault: fault || null, recordFaults: faults.filter((f) => !f.fatal && f.state === "active"),
     attention: runtime.paused ? fault && attention?.faultId !== fault.id ? { faultId: fault.id, source: "scheduler", reason: fault.summary, at: fault.createdAt, diagnostic: fault.diagnostic, previousNoticeStale: true } : attention : null,
     activity: config ? codexActivity(config.rolloutPath).state : "unconfigured" };
@@ -200,11 +212,11 @@ export function claimWakeRunner(folder) {
   try { fs.mkdirSync(lock); }
   catch {
     const owner = readWakeJson(path.join(lock, "owner.json"));
-    if (wakeAlive(owner?.pid) || !owner && Date.now() - fs.statSync(lock).mtimeMs < 5000) return false;
+    if (wakeAlive(owner?.pid) && (!owner.worker || wakeWorkerIdentity(owner.pid)) || !owner && Date.now() - fs.statSync(lock).mtimeMs < 5000) return false;
     if (fs.existsSync(path.join(lock, "owner.json"))) fs.unlinkSync(path.join(lock, "owner.json"));
     try { fs.rmdirSync(lock); fs.mkdirSync(lock); } catch { return false; }
   }
-  writeWakeJson(path.join(lock, "owner.json"), { pid: process.pid }); return true;
+  writeWakeJson(path.join(lock, "owner.json"), { pid: process.pid, worker: path.resolve(process.argv[1] || "") === WORKER }); return true;
 }
 
 export function wakePrompt(controller, events) {
@@ -224,6 +236,7 @@ export function wakePrompt(controller, events) {
     let delivery; try { delivery = r ? readHandoff(r) : null; } catch { delivery = { invalid: "预读失败" }; }
     return { recordId: event.taskId, backend: event.backend || "native", cwd: r?.cwd, sessionId: r?.sessionId, owner: r?.owner,
       instructionState: r?.lastInstruction?.state, blocker: r?.terminalBlocker || null, delivery,
+      reports: events.filter(e => e.taskId === event.taskId && e.reportId).map(e => ({ eventId: e.eventId, requestId: e.requestId, reportArgs: { action: "report", task_id: e.taskId, backend: e.backend || "native", controller_id: controller, report_id: e.reportId } })),
       latestReply: !delivery && r?.observation?.completed ? redactText(r.observation.text || "").slice(-600) : null,
       transcriptArgs: event.backend === "orca" ? { action: "transcript", id: event.taskId, controller_id: controller, limit: 3, max_chars: 2400 } : null,
       statusArgs: event.backend === "orca" ? { action: "status", id: event.taskId, controller_id: controller } : { task_id: event.taskId, controller_id: controller } };
@@ -275,7 +288,8 @@ export async function dispatchWakeBatch(config, folder, events, options = {}) {
   const usageBefore = codexTokenTotals(config.rolloutPath);
   const runFile = path.join(folder, "runs", `${runId}.json`);
   const policy = coordinationConfig(config.controllerId);
-  const run = { id: runId, events, requestedEffort: eventEffort(policy, events), profile: policy.profile,
+  const run = { id: runId, events, triggerKind: "bridge_event", controllerId: config.controllerId, targetThreadId: config.targetThreadId,
+    causes: events.map(e => ({ eventId: e.eventId, taskId: e.taskId, requestId: e.requestId, type: e.type })), requestedEffort: eventEffort(policy, events), profile: policy.profile,
     state: "prepared", createdAt: new Date().toISOString(), cliPid: null, tools: [] };
   writeWakeJson(runFile, run);
   writeWakeJson(runtimeFile, { ...initialRuntime, activeRunId: runId, paused: false });
