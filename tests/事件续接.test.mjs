@@ -30,6 +30,47 @@ function fixture(enabled = true) {
   return { id, controller, folder, config };
 }
 
+test("逐项回执只确认处理项，遗漏项挂起不制造重试轮", async () => {
+  const f = fixture();
+  for (const reportId of ["a".repeat(64), "b".repeat(64)]) state.appendEvent(f.id, { type: "needs_input", reportId });
+  const events = queue.pendingWakeEvents(f.folder);
+  const result = await wake.dispatchWakeBatch(f.config, f.folder, events, { notify: false, runCodex: async () => ({ code: 0, threadId: f.config.targetThreadId,
+    message: JSON.stringify({ status: "handled", summary: "只处理甲", results: [{ event_id: events[0].id, outcome: "processed", summary: "已核对甲，乙待决" }] }) }) });
+  assert.equal(result.state, "needs_user"); assert.equal(queue.pendingWakeEvents(f.folder).length, 1);
+  assert.equal(wake.wakeStatus(f.controller).paused, true);
+  assert.equal(wake.validateEventResults({ status: "handled", summary: "旧整批" }, events), null);
+  assert.equal(wake.validateEventResults({ status: "handled", summary: "伪造", results: [{ event_id: "不存在", outcome: "processed", summary: "坏" }] }, events), null);
+  assert.equal(wake.validateEventResults({ status: "handled", summary: "重复", results: [0,1].map(() => ({ event_id: events[0].id, outcome: "processed", summary: "重复" })) }, events), null);
+});
+test("一次准备启用返回心跳核验结果，保留原故障与队列", async () => {
+  const f = fixture(false), faultId = crypto.randomUUID();
+  queue.writeWakeJson(path.join(f.folder, "runtime.json"), { paused: true, faultId });
+  queue.writeWakeJson(path.join(f.folder, "faults", `${faultId}.json`), { id: faultId, state: "active", fatal: true });
+  let launched = 0;
+  const result = await wake.wakeControl({ action: "start", controller_id: f.controller, cwd: root, target_thread_id: f.config.targetThreadId }, {
+    readCodexThread: async () => ({ path: f.config.rolloutPath }), ensureWakeWorker: async () => { launched++; return { ready: false, state: "unverified" }; }
+  });
+  assert.equal(launched, 1); assert.equal(result.enabled, true); assert.equal(result.paused, true);
+  assert.equal(result.workerLaunch.ready, false); assert.equal(result.currentFault.id, faultId);
+});
+test("原生完成清空current后仍核对原请求，预装逐报告稳定证明与正确工具", async () => {
+  const f = fixture(), cwd = path.join(root, f.id); fs.mkdirSync(cwd);
+  const r = { ...state.readTask(f.id), cwd, lastInstruction: { requestId: "原生甲" } }; state.writeTask(r);
+  state.writeRuntime(f.id, { current: { id: "原生甲" }, busy: true, owner: "codex" });
+  const { prepareReporter, submitReport } = await import("../plugins/claude-code/scripts/lib/主动回传.mjs");
+  const { observeLocalRecords } = await import("../plugins/claude-code/scripts/lib/本地观察.mjs");
+  const reporter = prepareReporter(r, { backend: "native" });
+  submitReport(reporter.context, { report_key: "原生完成", status: "completed", summary: "已完成" });
+  state.writeRuntime(f.id, { current: null, busy: false, owner: "codex" });
+  await observeLocalRecords(f.controller); await observeLocalRecords(f.controller);
+  const pending = queue.pendingWakeEvents(f.folder); assert.equal(pending.length, 1);
+  const prompt = wake.wakePrompt(f.controller, pending);
+  assert.ok(prompt.includes('"historical":false')); assert.ok(prompt.includes('"readyForReview":true'));
+  assert.ok(prompt.includes('"transcriptTool":"delegate_transcript"'));
+  state.writeRuntime(f.id, { current: null, busy: false, owner: "human", humanDraft: true });
+  assert.ok(!wake.wakePrompt(f.controller, pending).includes('"readyForReview":true'));
+});
+
 test("初始化写入器占用不暂停、不确认交付，退避后同批事件成功处理", async () => {
   const f = fixture(); state.appendEvent(f.id, { type: "instruction_completed" });
   const pending = queue.pendingWakeEvents(f.folder);

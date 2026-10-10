@@ -1,11 +1,11 @@
 {
   "name": "claude-code",
-  "version": "0.22.0",
+  "version": "0.23.0",
   "description": "让 Codex 按协作频率指挥 Claude Code，管理可见会话、阶段交付与验收。",
   "author": {
     "name": "lordfine"
   },
-  "skills": "./skills/consult-claude",
+  "skills": "./skills/",
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Claude 协作桥接",

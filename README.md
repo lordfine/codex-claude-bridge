@@ -6,7 +6,7 @@
 
 **把一个需求，变成有分工、有进度、有验收的 AI 协作任务。**
 
-[![版本](https://img.shields.io/badge/版本-v0.22.0-303c3b)](https://github.com/lordfine/codex-claude-bridge/releases/latest)
+[![版本](https://img.shields.io/badge/版本-v0.23.0-303c3b)](https://github.com/lordfine/codex-claude-bridge/releases/latest)
 [![检查](https://github.com/lordfine/codex-claude-bridge/actions/workflows/test.yml/badge.svg)](https://github.com/lordfine/codex-claude-bridge/actions/workflows/test.yml)
 [![许可](https://img.shields.io/github/license/lordfine/codex-claude-bridge?label=许可)](./LICENSE)
 
@@ -100,7 +100,13 @@
 
 ## 怎么开始？
 
-**0.22.0：Claude 主动交付，Codex 有事再处理。** 新增 MCP／CLI 回传、当前轮证据箱和明确的采用回执；派工更短，通知与失败状态更准确。完成且不再复用的自建会话、工作树与分支可清理。默认事件驱动等待，保留 Goal 宿主兼容边界。[怎么用](./docs/主动回传与收尾.md) · [实测与限制](./docs/版本验证-0.22.0.md)
+**0.23.0：少补查、交付逐份处理、复盘一键收集。** 唤醒时带齐报告和稳定性证据；重要报告分别留队，后来的进度不会顶掉交付；每份报告明确记录是否已处理。新增“桥接复盘”技能，在干活的 Codex 窗口调用即可生成本地脱敏报告和证据包。[复盘怎么用](./docs/迭代复盘.md) · [实测与限制](./docs/版本验证-0.23.0.md)
+
+在使用插件执行任务的 Codex 窗口输入：
+
+> 使用 $claude-code:bridge-retrospective 复盘本次 Claude 协作，生成用于优化连接器的证据包。
+
+它自动定位当前主控及关联 Claude 日志，由本地程序统计。你把返回的证据包路径交给插件开发窗口即可继续迭代；不用手动导出整段聊天，也不会自动上传日志。用量不等于账单，实际费用与节省比例需要真实结算证据。
 
 先准备：**Codex、Claude Code、Node.js 20+、Git**。本文安装命令使用 Codex CLI；Windows 普通终端窗口还需要 **Windows Terminal、PowerShell 7**，Mac 使用系统 Terminal。Claude Code 必须已能使用你的当前登录或模型配置工作。
 

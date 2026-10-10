@@ -6,10 +6,11 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { prepareReporter, submitReport, reportReceipt } from "../plugins/claude-code/scripts/lib/主动回传.mjs";
+import { prepareReporter, submitReport, reportReceipt, outstandingReports, reportPath } from "../plugins/claude-code/scripts/lib/主动回传.mjs";
 import { writeJson } from "../plugins/claude-code/scripts/lib/managed-state.mjs";
 import { wakeDir, pendingWakeEvents, acknowledgeWakeEvents } from "../plugins/claude-code/scripts/lib/事件队列.mjs";
 import { readHandoff } from "../plugins/claude-code/scripts/lib/协作策略.mjs";
+import { observeLocalRecords } from "../plugins/claude-code/scripts/lib/本地观察.mjs";
 function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "主动回传验证-"));
   const r = { id: crypto.randomUUID(), sessionId: crypto.randomUUID(), controllerId: "隔离主控", cwd: path.join(root, "工作区"), state: "attached", lastInstruction: { requestId: "委派甲" } };
@@ -17,6 +18,38 @@ function fixture() {
   const folder = wakeDir(root, r.controllerId); writeJson(path.join(folder, "config.json"), { enabled: true });
   return { root, r, file, folder, reporter: prepareReporter(r, { root }) };
 }
+test("连续交付不会被进度覆盖，稳定后逐份入队，禁用期间保留", async () => {
+  const f = fixture(); try {
+    writeJson(path.join(f.folder, "config.json"), { enabled: false });
+    const first = submitReport(f.reporter.context, { report_key: "批次甲", status: "completed", summary: "甲完成" });
+    const second = submitReport(f.reporter.context, { report_key: "批次乙", status: "completed", summary: "乙完成" });
+    submitReport(f.reporter.context, { report_key: "进度丙", status: "progress", summary: "普通进展" });
+    assert.equal(reportReceipt(f.reporter.context, first.reportId).delivery, "pending_observation");
+    const options = { root: f.root, observe: () => ({ logged: true, completed: true }), probe: async () => ({ busy: false }), now: Date.now() };
+    await observeLocalRecords(f.r.controllerId, options); await observeLocalRecords(f.r.controllerId, options);
+    assert.equal(pendingWakeEvents(f.folder).length, 0);
+    writeJson(path.join(f.folder, "config.json"), { enabled: true });
+    await observeLocalRecords(f.r.controllerId, options);
+    const pending = pendingWakeEvents(f.folder);
+    assert.equal(pending.length, 2); assert.deepEqual(new Set(pending.map(e => e.reportId)), new Set([first.reportId, second.reportId]));
+    acknowledgeWakeEvents(f.folder, [pending[0]]);
+    await observeLocalRecords(f.r.controllerId, options);
+    assert.equal(pendingWakeEvents(f.folder).length, 1);
+    acknowledgeWakeEvents(f.folder, pendingWakeEvents(f.folder));
+    await observeLocalRecords(f.r.controllerId, options);
+    assert.equal(pendingWakeEvents(f.folder).length, 0, "报告全被处理后不额外派发完成观察轮");
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+test("旧格式未处理报告补入观察，旧确认回执不重放", () => {
+  const f = fixture(); try {
+    const receipt = submitReport(f.reporter.context, { report_key: "升级前", status: "blocked", summary: "待决定" });
+    const source = reportPath(f.root, "orca", f.r.id, receipt.reportId), target = path.join(f.root, "reports", `${receipt.reportId}.json`);
+    fs.renameSync(source, target);
+    assert.equal(outstandingReports(f.root, "orca", f.r).length, 1); assert.notEqual(reportPath(f.root, "orca", f.r.id, receipt.reportId), target);
+    acknowledgeWakeEvents(f.folder, pendingWakeEvents(f.folder));
+    assert.equal(outstandingReports(f.root, "orca", f.r).length, 0);
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
 test("回传绑定请求，重复回传只通知一次，消费回执不等于验收", () => {
   const f = fixture(); try {
     const data = { report_key: "阻塞甲", status: "blocked", summary: "需要决定", unresolved: ["方案选择"] };

@@ -176,9 +176,9 @@ const MANAGED_TOOLS = [
     }, required: ["action"], additionalProperties: false }
   },
   {
-    name: "delegate_wake", description: "diagnose 查看当前故障、心跳与通知回执；inspect/resolve 处理CLI运行，resolve_fault按故障编号和修复依据独立恢复调度。enable不解除故障，effectiveState区分启用与暂停。恢复不清空事件、不改变原启用配置。",
+    name: "delegate_wake", description: "start一次配置精确主控并启用，返回实际workerReady；不解除故障或证明交付成功。diagnose查看故障与心跳；inspect/resolve处理CLI运行；resolve_fault受控恢复调度。pickup只确认精确事件。",
     inputSchema: { type: "object", properties: {
-      action: { type: "string", enum: ["configure", "enable", "disable", "status", "resolve", "sync", "inspect", "diagnose", "resolve_fault", "pickup"] },
+      action: { type: "string", enum: ["start", "configure", "enable", "disable", "status", "resolve", "sync", "inspect", "diagnose", "resolve_fault", "pickup"] },
       event_ids: { type: "array", items: { type: "string" }, description: "pickup确认已经人工处理的精确排队事件id；不会确认其他事件" },
       delivery_revision: { type: "string" }, delivery_snapshot: { type: "string" },
       task_id: { type: "string" }, backend: { type: "string", enum: ["native", "orca"] }, request_id: { type: "string" },
