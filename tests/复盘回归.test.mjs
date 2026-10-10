@@ -6,8 +6,38 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { updateJson } from "../plugins/claude-code/scripts/lib/原子文件.mjs";
 import { writeJson } from "../plugins/claude-code/scripts/lib/managed-state.mjs";
-import { emptyPrompt } from "../plugins/claude-code/scripts/lib/Orca会话.mjs";
-import { messageOrigin } from "../plugins/claude-code/scripts/lib/会话读取.mjs";
+import { emptyPrompt, classifyTerminal } from "../plugins/claude-code/scripts/lib/Orca会话.mjs";
+import { messageOrigin, redactText } from "../plugins/claude-code/scripts/lib/会话读取.mjs";
+import { statusResponse, validateStatusCursor } from "../plugins/claude-code/scripts/lib/状态响应.mjs";
+
+test("权限、计费说明、分类器故障与输入草稿分别报告且不自动批准", () => {
+  const menu = ["Do you want to proceed?", "❯ 1. Yes", "  2. No"];
+  assert.equal(classifyTerminal(menu).kind, "permission_requested");
+  assert.equal(classifyTerminal(["Auto mode API usage billing", ...menu]).kind, "system_notice");
+  assert.equal(classifyTerminal(["Stage 2 classifier error", ...menu]).kind, "classifier_unavailable");
+  assert.equal(classifyTerminal(["❯ 尚未发送的真实草稿"]).kind, "draft_present");
+  assert.equal(classifyTerminal(menu).actionable, false);
+});
+test("状态游标拒绝跨目标、跨类型及跨终端实例", () => {
+  const cursor = statusResponse({ id: "甲", incarnationId: "实例甲" }).statusCursor;
+  assert.equal(typeof validateStatusCursor(cursor, "甲", "task_status", "实例甲"), "string");
+  assert.throws(() => validateStatusCursor(cursor, "乙", "task_status", "实例甲"), /invalid_cursor/);
+  assert.throws(() => validateStatusCursor(cursor, "甲", "controller_overview", "实例甲"), /invalid_cursor/);
+  assert.throws(() => validateStatusCursor(cursor, "甲", "task_status", "实例乙"), /invalid_cursor/);
+});
+test("URL身份和Basic凭据先脱敏，保留诊断路径", () => {
+  const result = redactText("https://用户:合成令牌@example.test/path Basic c2VjcmV0");
+  assert.ok(!result.includes("合成令牌") && !result.includes("用户") && !result.includes("c2VjcmV0")); assert.match(result, /example.test\/path/);
+});
+
+test("新版通知与尾随说明可识别，普通引用不能冒充队友", () => {
+  const message = { content: '<task-notification><task-id>任务甲</task-id><status>completed</status><note>说明</note><result>正文</result></task-notification>' };
+  assert.equal(messageOrigin({ type: "user", origin: { kind: "task-notification", producer: "session-task" }, promptSource: "system", message }), "task_notification");
+  assert.equal(messageOrigin({ type: "user", message }), "human_input");
+  const teammate = { content: 'Another Claude session sent a message:\n<teammate-message teammate_id="审查员">结果</teammate-message>\n尾随系统说明' };
+  assert.equal(messageOrigin({ type: "user", userType: "external", entrypoint: "cli", message: teammate }), "agent_notification");
+  assert.equal(messageOrigin({ type: "user", message: teammate }), "human_input");
+});
 
 test("短暂 EPERM 重试原子替换，永久失败保留旧文件并清理自己的临时文件", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "桥接写入回归-")), file = path.join(root, "状态.json");

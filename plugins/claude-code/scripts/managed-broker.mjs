@@ -13,7 +13,8 @@ import { scheduleNext, invalidatePendingPermissions } from "./lib/managed-servic
 import { activeTerminalInput, hasHumanIntervention } from "./lib/managed-input.mjs";
 import { executable, ipcEndpoints, trustConfirmationKey } from "./lib/平台适配.mjs";
 import { executionClock } from "./lib/执行计时.mjs";
-import { findSession } from "./lib/会话读取.mjs";
+import { findSession, redactText } from "./lib/会话读取.mjs";
+import { deliveryInstruction } from "./lib/协作策略.mjs";
 
 const id = process.argv[2];
 const task = id && readTask(id);
@@ -28,7 +29,10 @@ const args = [task.resume ? "--resume" : "--session-id", task.sessionId,
   "--permission-mode", "bypassPermissions",
   "--settings", task.settingsPath];
 if (task.model) args.push("--model", task.model);
-if (task.initialPrompt) args.push(task.initialPrompt);
+if (task.reportMcpConfig) args.push("--mcp-config", task.reportMcpConfig);
+// MCP 配置参数接受多值，必须先结束选项解析，避免首条任务被当成配置文件。
+const deferredInitial = process.platform === "win32" && Boolean(task.initialPrompt?.includes("\n"));
+if (task.initialPrompt && !deferredInitial) args.push("--", task.initialPrompt);
 const claudeCommand = process.platform === "win32" ? "cmd.exe" : executable("claude");
 const claudeArgs = process.platform === "win32" ? ["/c", "claude.cmd", ...args] : args;
 const terminal = pty.spawn(claudeCommand, claudeArgs, {
@@ -51,7 +55,7 @@ let limitHit = false;
 let cancelRequested = false;
 let ready = false;
 let readyTimer = null;
-let busy = Boolean(task.initialPrompt);
+let busy = Boolean(task.initialPrompt && !deferredInitial);
 let failure = null;
 let owner = "codex";
 let takeoverPending = false;
@@ -68,10 +72,11 @@ let settleTimer = null;
 let interruptTimer = null;
 let queue = Array.isArray(task.resumeQueue) ? task.resumeQueue : [];
 let savedQueue = "";
-let current = task.initialPrompt ? {
-  id: crypto.randomUUID(), prompt: task.initialPrompt,
+let current = task.initialPrompt && !deferredInitial ? {
+  id: task.initialRequestId || crypto.randomUUID(), prompt: task.initialPrompt,
   createdAt: new Date().toISOString(), state: "written", initial: true
 } : null;
+if (deferredInitial) queue.unshift({ id: task.initialRequestId || crypto.randomUUID(), prompt: task.initialPrompt, createdAt: new Date().toISOString(), state: "queued", initial: true });
 let startupScreen = "";
 let trustedOwnWorktree = false;
 const declinedMcpServers = new Set();
@@ -118,13 +123,19 @@ const writeState = () => {
   });
 };
 const submitted = (item) => {
+  if (!item.initial && task.reportMcpConfig && task.processDocuments && !/^\s*\//.test(item.prompt)) {
+    const fresh = readTask(id);
+    fresh.lastInstruction = { requestId: item.id };
+    item.prompt += deliveryInstruction(fresh, task.processDocuments, { backend: "native" });
+    writeTask(fresh);
+  }
   current = item;
   current.state = "written";
   busy = true;
   appendEvent(id, { type: "instruction_written", commandId: item.id });
   writeState();
   // 让交互界面先接收文本，再单独提交；同一批文本中的 Enter 可能早于输入状态更新。
-  terminal.write(item.prompt);
+  terminal.write(item.prompt.includes("\n") ? `\x1b[200~${item.prompt}\x1b[201~` : item.prompt);
   setTimeout(() => {
     if (!exited && current?.id === item.id && owner === "codex") terminal.write("\r");
   }, 180);
@@ -188,6 +199,7 @@ terminal.onData((data) => {
   if (connected && !connected.destroyed) connected.write(data);
 });
 terminal.onExit(({ exitCode: code }) => {
+  if (code && !ready) failure = { error: "startup_exit", exitCode: code, detail: redactText(startupScreen).replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").slice(-3000), at: new Date().toISOString() };
   lastActivity = { commandId: current?.id || null, busy, backgroundCount: backgroundTasks.length, activeSubagentCount: activeSubagents.size };
   exited = true;
   ready = false; busy = false; current = null; takeoverPending = false; takeoverImmediate = false;

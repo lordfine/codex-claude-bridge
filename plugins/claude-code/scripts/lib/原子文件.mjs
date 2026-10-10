@@ -28,6 +28,7 @@ function locked(file, work) {
 }
 // 始终替换原文件，绝不先删除目的文件；短暂共享锁不应丢失有效快照。
 export function atomicJson(file, value, options = {}) { return locked(file, () => replace(file, value, options)); }
+export function atomicText(file, value) { return locked(file, () => replace(file, value, { serialize: String })); }
 export function updateJson(file, change) {
   return locked(file, () => {
     let current; try { current = JSON.parse(fs.readFileSync(file, "utf8")); } catch {}
@@ -35,11 +36,11 @@ export function updateJson(file, change) {
     return next === undefined ? current : replace(file, next);
   });
 }
-function replace(file, value, { rename = fs.renameSync, delays = [10, 20, 40, 80, 160, 250] } = {}) {
+function replace(file, value, { rename = fs.renameSync, delays = [10, 20, 40, 80, 160, 250], serialize = v => JSON.stringify(v, null, 2) } = {}) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const temporary = `${file}.${process.pid}.${crypto.randomBytes(8).toString("hex")}.tmp`;
   try {
-    fs.writeFileSync(temporary, JSON.stringify(value, null, 2), "utf8");
+    fs.writeFileSync(temporary, serialize(value), "utf8");
     for (let attempt = 0; ; attempt++) {
       try { rename(temporary, file); return value; }
       catch (error) {

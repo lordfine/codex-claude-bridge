@@ -72,7 +72,7 @@ function sharedWorkspace(task) {
   });
 }
 
-export function archiveTask(reference, controller, summary, cleanup = true) {
+export function archiveTask(reference, controller, summary, cleanup = true, noReuse = false) {
   const selected = resolveManagedReference(reference, controller);
   return withSessionLock(selected.sessionId, () => {
     const task = readTask(selected.id), runtime = readRuntime(task.id);
@@ -104,6 +104,24 @@ export function archiveTask(reference, controller, summary, cleanup = true) {
         const target = native(task.cwd);
         if (path.dirname(target) !== root) record.cleanupReason = "真实目录不在托管清理范围，保留";
         else {
+          if (noReuse && task.processDocuments) {
+            const processDir = path.join(target, ".协作记录", task.id);
+            const names = ["任务说明.md", "当前交付.md", "验证记录.md"];
+            if (fs.existsSync(processDir) && !fs.lstatSync(path.dirname(processDir)).isSymbolicLink() && !fs.lstatSync(processDir).isSymbolicLink() &&
+              fs.readdirSync(processDir).every(name => names.includes(name) && fs.lstatSync(path.join(processDir, name)).isFile() && !fs.lstatSync(path.join(processDir, name)).isSymbolicLink())) {
+              const saved = path.join(taskDir(task.id), "交付留档"); fs.mkdirSync(saved, { recursive: true });
+              for (const name of fs.readdirSync(processDir)) fs.copyFileSync(path.join(processDir, name), path.join(saved, name));
+              for (const name of fs.readdirSync(processDir)) fs.unlinkSync(path.join(processDir, name));
+              fs.rmdirSync(processDir);
+              if (!fs.readdirSync(path.dirname(processDir)).length) fs.rmdirSync(path.dirname(processDir));
+            }
+            const edit = task.processDocuments.ignoreEdit, ignore = path.join(target, ".gitignore");
+            if (edit && !fs.existsSync(path.dirname(processDir)) && fs.existsSync(ignore) && !fs.lstatSync(ignore).isSymbolicLink() && fs.readFileSync(ignore, "utf8") === edit.after) {
+              let tracked = null; try { tracked = git(target, "show", "HEAD:.gitignore"); } catch {}
+              if (tracked === null && !edit.existed) fs.unlinkSync(ignore);
+              else if (tracked !== null && tracked === edit.before.trimEnd()) fs.writeFileSync(ignore, edit.before, "utf8");
+            }
+          }
           if (git(task.cwd, "status", "--porcelain", "--ignored")) record.cleanupReason = "存在未提交或忽略文件，保留目录";
           else {
             let included = task.kind === "review";
@@ -123,8 +141,12 @@ export function archiveTask(reference, controller, summary, cleanup = true) {
         }
       }
     }
+    if (cleanup && noReuse && record.cwdRemoved && ownedWorkspace(task) && task.branch?.startsWith("codex/") && !record.branchRemoved) {
+      try { archivedGit(record, task.source, "branch", "-d", "--", task.branch); record.branchRemoved = true; }
+      catch { record.branchCleanupReason = "分支仍有未合入提交、被占用或已不存在，未强制删除"; }
+    }
     writeTask(task);
-    return { id: task.id, alias: task.alias || null, archived: true, cwdRemoved: record.cwdRemoved,
+    return { id: task.id, alias: task.alias || null, archived: true, cwdRemoved: record.cwdRemoved, branchRemoved: record.branchRemoved || false, branchCleanupReason: record.branchCleanupReason || null,
       cleanupReason: record.cleanupReason, summary: record.summary.slice(0, 300) };
   });
 }
@@ -242,7 +264,7 @@ export async function manageTasks(args = {}) {
       else if (action === "archive") {
         checkWorkflowArchive(task);
         if (readRuntime(task.id)?.status === "idle") await suspendIdleManaged(task.id, controller);
-        result = archiveTask(task.id, controller, args.summary, args.cleanup !== false);
+        result = archiveTask(task.id, controller, args.summary, args.cleanup !== false, args.no_reuse_confirmed === true);
       }
       else if (action === "open") result = readRuntime(task.id)?.connected && !args.reconnect ? { alreadyVisible: true } : openVisibleWindow(task.id, controller);
       else throw new Error("未知管理操作");

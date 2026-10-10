@@ -15,6 +15,18 @@ const queue = await import("../plugins/claude-code/scripts/lib/事件队列.mjs"
 const wake = await import("../plugins/claude-code/scripts/lib/事件续接.mjs");
 const watcher = await import("../plugins/claude-code/scripts/lib/本地观察.mjs");
 const orcaModule = await import("../plugins/claude-code/scripts/lib/Orca会话.mjs");
+
+test("开发服务经主控明确分类后不阻下一阶段，记录仍保留用于清理检查", () => {
+  const f = fixture();
+  f.append([f.entry("user", "执行 <bridge-instruction:test>"), f.entry("assistant", [{ type: "tool_use", id: "服务一", name: "Bash", input: { run_in_background: true } }]), f.entry("assistant", "主轮结束", { message: { content: "主轮结束", stop_reason: "end_turn" } })]);
+  const before = reader.observeInstruction(f.sessionId, f.cwd, f.r.lastInstruction);
+  assert.equal(before.backgroundOutstanding, true);
+  f.r.observation = before; state.writeJson(path.join(state.MANAGED_ROOT, "orca", "会话", `${f.r.id}.json`), f.r);
+  policy.coordinationControl({ action: "background_role", backend: "orca", task_id: f.r.id, controller_id: f.r.controllerId, request_id: "指令一", background_id: "服务一", role: "service", reason: "已确认是保留供下一阶段使用的开发服务" });
+  const current = state.readJson(path.join(state.MANAGED_ROOT, "orca", "会话", `${f.r.id}.json`));
+  const after = reader.observeInstruction(f.sessionId, f.cwd, current.lastInstruction, before);
+  assert.equal(after.backgroundOutstanding, false); assert.ok(after.background["服务一"]); assert.deepEqual(after.backgroundServices, ["服务一"]);
+});
 function fixture() {
   const id = crypto.randomUUID(), controllerId = crypto.randomUUID(), sessionId = crypto.randomUUID(), cwd = path.join(root, id);
   fs.mkdirSync(cwd); fs.writeFileSync(path.join(cwd, "实现.md"), "初始内容");

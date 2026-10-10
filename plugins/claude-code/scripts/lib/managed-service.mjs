@@ -17,6 +17,7 @@ import { roleModel } from "./managed-preferences.mjs";
 import { withSessionLock } from "./managed-lock.mjs";
 import { validateProfile, effectiveProfile, prepareRecordDocuments, deliveryInstruction } from "./协作策略.mjs";
 import { sessionProcessRunning } from "./平台适配.mjs";
+import { prepareReportSession } from "./主动回传.mjs";
 
 const BROKER = fileURLToPath(new URL("../managed-broker.mjs", import.meta.url));
 const WATCHDOG = fileURLToPath(new URL("../managed-watchdog.mjs", import.meta.url));
@@ -331,8 +332,11 @@ function createManagedTaskUnlocked(options = {}) {
   try {
     fs.mkdirSync(taskDir(id), { recursive: true });
     if (kind === "implementation" && options.process_docs === true && task.initialPrompt) {
+      task.initialRequestId = crypto.randomUUID();
+      task.lastInstruction = { requestId: task.initialRequestId };
       task.processDocuments = prepareRecordDocuments(task, options.prompt);
-      task.initialPrompt += deliveryInstruction(task, task.processDocuments);
+      task.reportMcpConfig = prepareReportSession(task, { backend: "native" });
+      task.initialPrompt += deliveryInstruction(task, task.processDocuments, { backend: "native" });
     }
     task.settingsPath = prepareClaudeSettings(task);
     task.handbackCommand = prepareHandbackCommand(task);

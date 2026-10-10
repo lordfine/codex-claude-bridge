@@ -5,7 +5,7 @@ import { MANAGED_ROOT, controllerId, listTasks, readJson, readRuntime } from "./
 import { coordinationConfig, effectiveProfile } from "./协作策略.mjs";
 import { wakeStatus } from "./事件续接.mjs";
 import { redactText } from "./会话读取.mjs";
-import { statusResponse } from "./状态响应.mjs";
+import { statusResponse, validateStatusCursor } from "./状态响应.mjs";
 
 const hash = (v) => crypto.createHash("sha256").update(JSON.stringify(v)).digest("hex");
 function needsAcceptance(backend, r, observer) {
@@ -14,6 +14,7 @@ function needsAcceptance(backend, r, observer) {
 }
 export function overview(args = {}) {
   const controller = args.controller_id || controllerId(); if (!controller) throw new Error("需要主控任务 ID");
+  if (args.after_cursor !== undefined) args = { ...args, after_revision: validateStatusCursor(args.after_cursor, controller, "controller_overview") };
   const limit = Math.min(Math.max(Number(args.limit) || 10, 1), 50);
   const tasks = listTasks(controller).filter((r) => !r.archivedAt && !r.supersededBy).map((r) => {
     const runtime = readRuntime(r.id), observer = readJson(path.join(MANAGED_ROOT, "observers", `native-${r.id}.json`));
@@ -53,7 +54,7 @@ export async function compactObservation(name, args, fn) {
   const signature = hash([r.state, r.owner, r.lastInstruction?.state, r.cancelRequested, r.controlRevision, r.terminalBlocker, runtime?.status, runtime?.failure, runtime?.owner, eventsSize]);
   const profile = r.coordinationProfile || coordinationConfig(controller).profile, cooldown = { low: 60000, medium: 15000, high: 3000 }[profile];
   const previous = recent.get(key);
-  if (!args.force && previous?.signature === signature && Date.now() - previous.at < cooldown) return { content: [{ type: "text", text: JSON.stringify(statusResponse({ unchanged: true, taskId: id, revision: previous.revision || signature, lastInstruction: r.lastInstruction, owner: r.owner, terminalBlocker: r.terminalBlocker, nextAction: "结束本轮，等待阶段交付或关键异常", retryAfterMs: cooldown - (Date.now() - previous.at), forceForUserQuery: true })) }] };
+  if (!args.force && previous?.signature === signature && Date.now() - previous.at < cooldown) return { content: [{ type: "text", text: JSON.stringify(statusResponse({ unchanged: true, taskId: id, incarnationId: r.incarnationId, revision: previous.revision || signature, lastInstruction: r.lastInstruction, owner: r.owner, terminalBlocker: r.terminalBlocker, nextAction: "结束本轮，等待阶段交付或关键异常", retryAfterMs: cooldown - (Date.now() - previous.at), forceForUserQuery: true })) }] };
   const result = await fn(); let response; try { response = JSON.parse(result.content?.[0]?.text); } catch {}
   if (!result.isError) recent.set(key, { signature, revision: response?.revision, at: Date.now() });
   if (recent.size > 1000) recent.delete(recent.keys().next().value);

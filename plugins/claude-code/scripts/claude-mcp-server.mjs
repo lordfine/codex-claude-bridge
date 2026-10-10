@@ -48,6 +48,7 @@ async function handleManagedReview(args) {
 
 
 async function handleSetup(args) { return managedResult({ ...checkManagedReadiness({ deep: Boolean(args?.deep) }), service: { version: SERVER_VERSION, pid: process.pid,
+  executorReport: { protocol: 1, mcp: true, cli: true, receipt: true }, scheduling: { default: "event_driven", activeGoalExternalWait: "unverified" }, typedStatusCursor: true,
   wakeActions: TOOLS.find((t) => t.name === "delegate_wake").inputSchema.properties.action.enum, orcaActions: TOOLS.find((t) => t.name === "delegate_orca").inputSchema.properties.action.enum } }); }
 
 async function handleMessage(message) {
