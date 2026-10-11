@@ -18,7 +18,7 @@
 [![Checks](https://github.com/lordfine/codex-claude-bridge/actions/workflows/test.yml/badge.svg)](https://github.com/lordfine/codex-claude-bridge/actions/workflows/test.yml)
 [![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20macOS-65766c)](./docs/Mac安装与验收.md)
 [![Agent Skill](https://img.shields.io/badge/Agent_Skill-installable-41785d)](#install-an-agent-skill)
-[![License](https://img.shields.io/github/license/lordfine/codex-claude-bridge?color=ce744b)](./LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-ce744b)](./LICENSE)
 
 [Quick start](#quick-start) · [Agent Skill](#install-an-agent-skill) · [Frequency & reasoning](#frequency-and-reasoning-are-independent) · [Verification](./docs/版本验证-0.24.0.md) · [简体中文](#简体中文)
 
@@ -157,7 +157,7 @@ MIT licensed; inherited copyrights are retained. [Project origins](./docs/项目
 [![版本](https://img.shields.io/github/v/release/lordfine/codex-claude-bridge?label=版本&color=274b3b)](https://github.com/lordfine/codex-claude-bridge/releases/latest)
 [![检查](https://github.com/lordfine/codex-claude-bridge/actions/workflows/test.yml/badge.svg)](https://github.com/lordfine/codex-claude-bridge/actions/workflows/test.yml)
 [![平台](https://img.shields.io/badge/平台-Windows%20%7C%20macOS-65766c)](./docs/Mac安装与验收.md)
-[![许可](https://img.shields.io/github/license/lordfine/codex-claude-bridge?label=许可&color=ce744b)](./LICENSE)
+[![许可](https://img.shields.io/badge/许可-MIT-ce744b)](./LICENSE)
 
 [快速开始](#快速开始) · [选择运行方式](#选择运行方式) · [频率与思考](#频率与思考分别调) · [验证记录](./docs/版本验证-0.24.0.md) · [最新版本](https://github.com/lordfine/codex-claude-bridge/releases/latest)
 
