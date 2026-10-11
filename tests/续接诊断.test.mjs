@@ -56,6 +56,11 @@ test("单条记录失败保留游标且不阻断其他会话，恢复后新故�
   const result = await watcher.observeLocalRecords(bad.controller, options);
   assert.equal(result.errors, 1); assert.equal(good.record().lastInstruction.state, "completed");
   const saved = state.readJson(file); assert.equal(saved.observation.cursor.offset, 123); assert.equal(saved.handoffSignature, "原交付");
+  const faultEvents = queue.pendingWakeEvents(bad.folder).filter(e => e.taskId === bad.id && e.type === "recovery_uncertain");
+  assert.equal(faultEvents.length, 1); assert.equal(faultEvents[0].faultId, saved.faultId);
+  assert.equal(saved.retryAfter, 15000);
+  const backedOff = await watcher.observeLocalRecords(bad.controller, { ...options, now: 11000 });
+  assert.equal(backedOff.errors, 0); assert.equal(diag.schedulerFaults(bad.folder, saved.faultId).occurrences, 1);
   const recovered = { ...options, now: 16000, observe: () => ({ logged: true, completed: true }) }; await watcher.observeLocalRecords(bad.controller, recovered);
   assert.equal(diag.schedulerFaults(bad.folder, saved.faultId).state, "observation_recovered");
   await watcher.observeLocalRecords(bad.controller, { ...options, now: 22000 }); assert.notEqual(state.readJson(file).faultId, saved.faultId);

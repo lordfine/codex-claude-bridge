@@ -7,7 +7,8 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { MANAGED_ROOT, controllerId, readJson, writeJson, resolveModel, listTasks, readRuntime } from "./managed-state.mjs";
 import { observeInstruction, readHistory, diagnoseCursor, observeHumanActivity, readTaskResult, scanSession, entryText, redactText } from "./会话读取.mjs";
-import { effectiveProfile, validateProfile, prepareRecordDocuments, deliveryInstruction } from "./协作策略.mjs";
+import { effectiveProfile, effectiveThinking, validateProfile, prepareRecordDocuments, deliveryInstruction } from "./协作策略.mjs";
+import { validateThinking, claudeThinkingArgs } from "./思考控制.mjs";
 import { orcaLaunch, executable as resolveExecutable } from "./平台适配.mjs";
 import { statusResponse, validateStatusCursor } from "./状态响应.mjs";
 import { pendingWakeEvents, wakeDir } from "./事件队列.mjs";
@@ -120,7 +121,7 @@ export function createOrcaAdapter({ call = orcaCall, root = path.join(MANAGED_RO
   const records = () => { try { return fs.readdirSync(folder).filter((f) => f.endsWith(".json")).map((f) => readJson(path.join(folder, f))).filter(Boolean); } catch { return []; } };
   const summary = (r) => ({ id: r.id, controllerId: r.controllerId, sessionId: r.sessionId, cwd: r.cwd,
     terminalId: r.terminalId, incarnationId: r.incarnationId, runtimeId: r.runtimeId, createdByPlugin: r.createdByPlugin,
-    state: r.state, owner: r.owner || "codex", management: r.state === "attached" ? "retained" : "released", backgroundOutstanding: Boolean(r.observation?.backgroundOutstanding), terminalBlocker: r.terminalBlocker || null, humanActivity: r.humanActivity || null, model: r.model, profile: effectiveProfile(r), revision: r.revision || null, lastInstruction: r.lastInstruction ? { requestId: r.lastInstruction.requestId,
+    state: r.state, owner: r.owner || "codex", management: r.state === "attached" ? "retained" : "released", backgroundOutstanding: Boolean(r.observation?.backgroundOutstanding), terminalBlocker: r.terminalBlocker || null, humanActivity: r.humanActivity || null, model: r.model, profile: effectiveProfile(r), thinking: effectiveThinking(r), thinkingApplication: r.thinkingApplication || { state: "not_applied", actual: null, providerVerification: "unverified" }, revision: r.revision || null, lastInstruction: r.lastInstruction ? { requestId: r.lastInstruction.requestId,
       state: r.lastInstruction.state, orcaRequestId: r.lastInstruction.orcaRequestId } : null });
 
   async function bound(r) {
@@ -232,6 +233,7 @@ export function createOrcaAdapter({ call = orcaCall, root = path.join(MANAGED_RO
       if (!args.cwd || !path.isAbsolute(args.cwd) || !fs.existsSync(args.cwd)) throw new Error("须提供存在的绝对工作区目录");
       const active = records().filter((r) => r.state === "attached");
       if (args.action === "attach") {
+        if (args.thinking != null) validateThinking(args.thinking);
         if (!UUID.test(String(args.session_id))) throw new Error("须提供精确 Claude 会话 UUID");
         if (args.idle_confirmed !== true) throw new Error("接入需要确认人类队列已清空，允许空闲时执行 /status 身份握手");
         if (listTasks().some((task) => task.sessionId?.toLowerCase() === args.session_id.toLowerCase() && !task.archivedAt &&
@@ -255,7 +257,8 @@ export function createOrcaAdapter({ call = orcaCall, root = path.join(MANAGED_RO
             return rebind(sameSession, args, t, response, checked);
           }
           const r = { id: crypto.randomUUID(), controllerId: master, ...checked, cwd: args.cwd, terminalId: t.handle,
-            incarnationId: t.incarnationId, runtimeId: response._meta.runtimeId, createdByPlugin: false, state: "attached", coordinationProfile: args.profile || null, createdAt: new Date().toISOString() };
+            incarnationId: t.incarnationId, runtimeId: response._meta.runtimeId, createdByPlugin: false, state: "attached", coordinationProfile: args.profile || null,
+            thinkingLevel: args.thinking || null, thinkingApplication: { state: "not_applied", actual: null, providerVerification: "unverified" }, createdAt: new Date().toISOString() };
           const file = transcriptFile(r.sessionId); r.managementCursor = { offset: file ? fs.statSync(file).size : 0 };
           writeJson(recordPath(r.id), r); return summary(r);
         }
@@ -265,13 +268,16 @@ export function createOrcaAdapter({ call = orcaCall, root = path.join(MANAGED_RO
       // --command 由 PowerShell 执行，所有可变参数均使用单引号转义；不拼接任务正文。
       const bridgeId = crypto.randomUUID();
       const reportMcpConfig = prepareReportSession({ id: bridgeId, sessionId, controllerId: master }, { root: path.dirname(root) });
-      const launch = orcaLaunch(sessionId, model, process.platform, reportMcpConfig);
+      if (args.thinking != null) validateThinking(args.thinking);
+      const plan = effectiveThinking({ controllerId: master, thinkingLevel: args.thinking });
+      const launch = orcaLaunch(sessionId, model, process.platform, reportMcpConfig, claudeThinkingArgs(plan, path.join(root, "思考配置", `${bridgeId}.json`)));
       const response = await call(["terminal", "create", "--worktree", `path:${args.cwd}`, "--title", args.title || "Codex 委派 Claude", "--shell", launch.shell, "--command", launch.command], args.cwd);
       const t = response.result.terminal;
       if (!t?.handle || !t.incarnationId || !response._meta?.runtimeId) throw new Error("Orca 未返回完整终端身份；新建回执不明，请先列出核对");
       const r = { id: bridgeId, controllerId: master, sessionId, cwd: args.cwd, terminalId: t.handle, reportMcpConfig,
         incarnationId: t.incarnationId, runtimeId: response._meta.runtimeId, createdByPlugin: true, state: "attached", model,
-        coordinationProfile: args.profile || null, createdAt: new Date().toISOString() };
+        coordinationProfile: args.profile || null, thinkingLevel: args.thinking || null,
+        thinkingApplication: { requested: plan.level, state: "launch_configured", actual: null, providerVerification: "unverified" }, createdAt: new Date().toISOString() };
       writeJson(recordPath(r.id), r);
       return { ...summary(r), ready: false, message: "原生终端已创建。首次信任或配置弹窗请在 Orca 处理；空闲后用 send 派发任务。" };
     }
@@ -566,7 +572,7 @@ export function createOrcaAdapter({ call = orcaCall, root = path.join(MANAGED_RO
       const owner = readJson(path.join(lock, "持有者.json"));
       let alive = owner?.pid ? true : Date.now() - fs.statSync(lock).mtimeMs < 5000;
       if (owner?.pid) { try { process.kill(owner.pid, 0); } catch { alive = false; } }
-      if (alive) throw new Error("Orca 桥接器正在操作，请稍后重试原 request_id");
+      if (alive) { const error = new Error("Orca 桥接器正在操作，请稍后重试原 request_id"); error.code = "ORCA_BRIDGE_BUSY"; throw error; }
       if (fs.existsSync(path.join(lock, "持有者.json"))) fs.unlinkSync(path.join(lock, "持有者.json"));
       fs.rmdirSync(lock); fs.mkdirSync(lock);
     }

@@ -4,8 +4,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
-import { collectIteration } from "../plugins/claude-code/scripts/lib/迭代采集.mjs";
+import { collectIteration, classifyIterationTool } from "../plugins/claude-code/scripts/lib/迭代采集.mjs";
 import { writeJson } from "../plugins/claude-code/scripts/lib/managed-state.mjs";
+import { wakeDir } from "../plugins/claude-code/scripts/lib/事件队列.mjs";
 
 function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "桥接复盘验证-")), controller = crypto.randomUUID(), id = crypto.randomUUID(), sessionId = crypto.randomUUID();
@@ -18,6 +19,40 @@ function fixture() {
   fs.writeFileSync(claude, [message, message].map(JSON.stringify).join("\n"));
   return { root, controller, rollout, claude, row, usage, options: { root, controller, rollout, output: root, until: "2026-10-11T00:00:00Z", findClaude: () => claude } };
 }
+test("包装观察工具可识别，混合修改和未知等待不会冒充纯观察", () => {
+  assert.equal(classifyIterationTool({ name: "exec", input: 'text(await tools.mcp__claude_code__delegate_status({task_id:"编号"}));' }).kind, "observation");
+  assert.equal(classifyIterationTool({ name: "exec", input: 'await tools.exec_command({cmd:"查看工具delegate_status"});' }).kind, "work");
+  assert.equal(classifyIterationTool({ name: "exec", input: 'text("tools.delegate_status()");' }).kind, "unknown");
+  assert.equal(classifyIterationTool({ name: "exec", input: 'fs.rmSync("目标"); await tools.delegate_status({});' }).kind, "unknown");
+  assert.equal(classifyIterationTool({ name: "wait", arguments: '{}' }).kind, "unknown");
+  assert.equal(classifyIterationTool({ name: "sleep" }).kind, "observation");
+  assert.equal(classifyIterationTool({ name: "exec", input: 'await tools.delegate_status({}); await tools.delegate_send({});' }).kind, "work");
+});
+test("递归工作流子日志和跨文件流式消息去重，缓存与输出不重复相加", async () => {
+  const f = fixture(); try {
+    const record = JSON.parse(fs.readFileSync(path.join(f.root,"orca","会话",fs.readdirSync(path.join(f.root,"orca","会话"))[0])));
+    const dir = path.join(f.root, record.sessionId, "workflows", "工作流", "subagents"); fs.mkdirSync(dir, { recursive: true });
+    const message = JSON.parse(fs.readFileSync(f.claude,"utf8").split("\n")[0]);
+    const child = { ...message, message: { ...message.message, id: "真实子代理", usage: { input_tokens: 5, output_tokens: 3, cache_read_input_tokens: 2 } } };
+    fs.writeFileSync(path.join(dir,"agent-甲.jsonl"), [message, child].map(JSON.stringify).join("\n"));
+    child.message.usage.output_tokens = 4; fs.writeFileSync(path.join(dir,"agent-乙.jsonl"), JSON.stringify(child));
+    const result = await collectIteration(f.options), data = JSON.parse(fs.readFileSync(result.evidence));
+    assert.equal(data.claude.subagents, 2); assert.equal(data.claude.messages, 2);
+    assert.equal(data.claude.usage.input_tokens, 15); assert.equal(data.claude.usage.output_tokens, 6);
+    assert.equal(data.claude.mainUsage.input_tokens, 10); assert.equal(data.claude.subagentUsage.output_tokens, 4);
+  } finally { fs.rmSync(f.root,{recursive:true,force:true}); }
+});
+test("重试事件只算一个原因，deferred_busy和人工确认不冒称模型执行", async () => {
+  const f = fixture(); try {
+    const folder = wakeDir(f.root, f.controller), event = { id: "同一事件", type: "needs_input" };
+    for (let i=0;i<3;i++) writeJson(path.join(folder,"runs",`${i}.json`), { id:String(i), createdAt:"2026-10-10T01:00:04Z", state:i===2 ? "acknowledged" : "deferred_busy", events:[event] });
+    const result = await collectIteration(f.options), data=JSON.parse(fs.readFileSync(result.evidence));
+    assert.equal(data.schemaVersion,2); assert.equal(data.collaboration.wakeRuns,3);
+    assert.equal(data.collaboration.wakeReasons.needs_input,1); assert.equal(data.collaboration.eventOccurrences.needs_input,3);
+    assert.equal(data.collaboration.executionsNotStarted,2); assert.equal(data.collaboration.executionsUnknown,1);
+    assert.equal(data.collaboration.modelExecutionsProved,0);
+  } finally { fs.rmSync(f.root,{recursive:true,force:true}); }
+});
 test("采集去重累计用量与Claude消息，证据不复制原文", async () => {
   const f = fixture(); try {
     const result = await collectIteration(f.options), raw = fs.readFileSync(result.evidence, "utf8"), data = JSON.parse(raw);

@@ -3,6 +3,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { readWakeJson, writeWakeJson } from "./事件队列.mjs";
 import { redactText } from "./会话读取.mjs";
+import { BRIDGE_VERSION } from "./运行版本.mjs";
 
 export function safeDiagnosticText(value, limit = 2000) {
   return redactText(String(value || ""))
@@ -15,17 +16,17 @@ export function safeDiagnosticText(value, limit = 2000) {
 export function diagnosticError(error, context = {}) {
   const name = /^[A-Za-z][A-Za-z0-9_]{0,60}$/.test(error?.name || "") ? error.name : "Error";
   const code = /^[A-Z0-9_]{1,60}$/.test(error?.code || "") ? error.code : null;
-  return { category: context.category || "SCHEDULER_ERROR", stage: context.stage || "unknown", name, code,
+  return { version: BRIDGE_VERSION, category: context.category || "SCHEDULER_ERROR", stage: context.stage || "unknown", name, code,
     message: safeDiagnosticText(error?.message || "未提供错误详情", 1000),
     frames: String(error?.stack || "").split("\n").filter((s) => /^\s*at\s/.test(s)).slice(0, 5).map((s) => safeDiagnosticText(s, 240)),
     taskId: context.taskId || null, backend: context.backend || null, at: new Date().toISOString() };
 }
 export function recordSchedulerFault(folder, error, context = {}, { fatal = false, notify } = {}) {
-  const diagnostic = diagnosticError(error, context), key = crypto.createHash("sha256").update(JSON.stringify([diagnostic.stage, diagnostic.taskId, diagnostic.backend, diagnostic.name, diagnostic.code, diagnostic.message])).digest("hex");
+  const diagnostic = diagnosticError(error, context), key = crypto.createHash("sha256").update(JSON.stringify([BRIDGE_VERSION, diagnostic.stage, diagnostic.taskId, diagnostic.backend, diagnostic.name, diagnostic.code, diagnostic.message])).digest("hex");
   const indexFile = path.join(folder, "fault-index.json"), index = readWakeJson(indexFile) || {};
   const prior = index[key] && readWakeJson(path.join(folder, "faults", `${index[key]}.json`));
   const fault = prior?.state === "active" ? { ...prior, occurrences: prior.occurrences + 1, lastSeenAt: diagnostic.at } : {
-    id: crypto.randomUUID(), state: "active", source: "scheduler", fatal, diagnostic, summary: `自动续接需要处理：${diagnostic.stage}／${diagnostic.code || diagnostic.name}`,
+    id: crypto.randomUUID(), version: BRIDGE_VERSION, dedupKey: key, state: "active", source: "scheduler", fatal, diagnostic, summary: `自动续接需要处理：${diagnostic.stage}／${diagnostic.code || diagnostic.name}`,
     createdAt: diagnostic.at, lastSeenAt: diagnostic.at, occurrences: 1, originalAt: context.originalAt || null, historical: context.historical === true };
   writeWakeJson(path.join(folder, "faults", `${fault.id}.json`), fault); index[key] = fault.id; writeWakeJson(indexFile, index);
   if (!prior || prior.state !== "active") fs.appendFileSync(path.join(folder, "diagnostics.jsonl"), JSON.stringify(fault) + "\n", "utf8");

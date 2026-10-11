@@ -76,6 +76,7 @@ export function attachSession(args = {}, sourceTask) {
   selectedSession(sessionId, cwd);
   const created = createManagedTask({ ...args, session_id: sessionId, cwd,
     profile: args.profile || sourceTask?.coordinationProfile || undefined,
+    thinking: args.thinking || sourceTask?.thinkingLevel || undefined,
     existing_idle_confirmed: true, reused_from_task_id: sourceTask?.id || null,
     attach_request_id: args.request_id, attach_signature: args.attach_signature, attach_alias: args.alias,
     ...(sourceTask?.kind === "review" ? { kind: "review", review_of: sourceTask.reviewOf, review_ref: sourceTask.reviewRef } : {}) });
