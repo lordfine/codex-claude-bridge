@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "name": "codex-claude-bridge",
+  "displayName": "Codex Claude Code Bridge",
+  "summary": "本机 MCP 连接器，让 Codex 分派、审查并验收 Claude Code 工作。",
+  "summaryEnglish": "A local MCP bridge and Codex plugin for Claude Code orchestration, event-driven handoffs, reasoning profiles and verification evidence reuse.",
+  "repository": "https://github.com/lordfine/codex-claude-bridge",
+  "latestRelease": "https://github.com/lordfine/codex-claude-bridge/releases/latest",
+  "license": "MIT",
+  "languages": ["en", "zh-CN"],
+  "platforms": ["Windows", "macOS"],
+  "keywords": ["Codex", "Claude Code", "MCP", "agent orchestration", "task delegation", "reasoning profiles", "verification evidence", "Orca", "CCSwitch", "Agent Skills"],
+  "onboardingSkill": {
+    "name": "codex-claude-bridge",
+    "path": "skills/codex-claude-bridge/SKILL.md",
+    "installCommand": "npx skills add lordfine/codex-claude-bridge --skill codex-claude-bridge --agent codex",
+    "executionHost": "Codex",
+    "providesMcpServerByItself": false,
+    "requiresPluginSetup": true,
+    "supportActionsAreOptional": true
+  },
+  "capabilities": {
+    "native": ["visible sessions", "isolated git worktrees", "independent review", "revision", "acceptance merging", "event-driven handoffs"],
+    "orca": ["attach exact session UUID", "create visible sessions", "read progress", "event-driven handoffs"],
+    "coordination": ["independent frequency and reasoning levels", "per-task override", "verification evidence reuse", "local redacted retrospective"]
+  },
+  "limitations": [
+    "Third-party provider reasoning support remains unverified.",
+    "Existing running Claude sessions may require an optional restart for settings.",
+    "Active Codex writers can delay automatic resumption.",
+    "Orca unified quotas and acceptance merging are not integrated.",
+    "No guaranteed token or monetary savings."
+  ]
+}

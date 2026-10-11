@@ -1,0 +1,26 @@
+# Codex Claude Code Bridge
+
+> A local MCP bridge and Codex plugin for Claude Code orchestration: scoped task delegation, visible native or Orca sessions, event-driven handoffs, reasoning profiles and verification evidence reuse. Windows and macOS. Uses the user's existing Claude Code model configuration.
+
+This project makes Codex the coordinator and Claude Code the executor. Codex can also edit code. Native managed tasks support isolated Git worktrees, independent review, revision and acceptance merging. Orca supports attaching or creating visible sessions; unified worktree merging and quotas are not integrated into that backend.
+
+## Discovery and onboarding
+
+- [Agent Skill](https://raw.githubusercontent.com/lordfine/codex-claude-bridge/main/skills/codex-claude-bridge/SKILL.md): first-time setup; the skill does not itself provide MCP tools.
+- [Skills installation](https://github.com/lordfine/codex-claude-bridge#install-an-agent-skill): `npx skills add lordfine/codex-claude-bridge --skill codex-claude-bridge --agent codex`.
+- [Project metadata](https://raw.githubusercontent.com/lordfine/codex-claude-bridge/main/项目说明.json): project-maintained capability metadata, not an external registry certification.
+
+## Documentation
+
+- [README, English then Chinese](https://github.com/lordfine/codex-claude-bridge): purpose, installation and verified scope.
+- [Quick start](https://github.com/lordfine/codex-claude-bridge/blob/main/docs/快速开始.md): native terminals, prerequisites and first task.
+- [Reasoning and verification reuse](https://github.com/lordfine/codex-claude-bridge/blob/main/docs/思考档位与证据复用.md): independent frequency and reasoning levels.
+- [Current verification record](https://github.com/lordfine/codex-claude-bridge/blob/main/docs/版本验证-0.24.0.md): measured evidence and limitations.
+- [Retrospective collection](https://github.com/lordfine/codex-claude-bridge/blob/main/docs/迭代复盘.md): local, redacted statistics; unknown costs remain unknown.
+- [Releases](https://github.com/lordfine/codex-claude-bridge/releases/latest): released source and checksums.
+
+## Boundaries
+
+Default: medium frequency and medium reasoning. Existing running Claude sessions may require an optional restart to apply settings. CLI-displayed reasoning does not prove a third-party gateway honors it. Active Codex writers can delay automatic resumption. Mac CI is not a Mac GUI/model field test. No guaranteed savings. Star and Watch are optional; the onboarding skill does not perform these actions or condition installation on them.
+
+本机连接器沿用用户现有配置。业务授权、会话身份、交付回执与验收是不同事实；以真实工具与运行证据为准。本文件是便于读取的文档入口，不保证所有搜索引擎或Agent自动使用。

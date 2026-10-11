@@ -1,3 +1,151 @@
+<a id="english"></a>
+
+<div align="center">
+
+**English** · [**简体中文 ↓**](#简体中文)
+
+</div>
+
+![Codex coordinates Claude Code through a local MCP bridge](./docs/图片/主页封面-英文.png)
+
+<div align="center">
+
+# Codex × Claude Code Bridge
+
+**A local MCP bridge for Codex to delegate, review and verify Claude Code work.**
+
+[![Release](https://img.shields.io/github/v/release/lordfine/codex-claude-bridge?label=release&color=274b3b)](https://github.com/lordfine/codex-claude-bridge/releases/latest)
+[![Checks](https://github.com/lordfine/codex-claude-bridge/actions/workflows/test.yml/badge.svg)](https://github.com/lordfine/codex-claude-bridge/actions/workflows/test.yml)
+[![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20macOS-65766c)](./docs/Mac安装与验收.md)
+[![Agent Skill](https://img.shields.io/badge/Agent_Skill-installable-41785d)](#install-an-agent-skill)
+[![License](https://img.shields.io/github/license/lordfine/codex-claude-bridge?color=ce744b)](./LICENSE)
+
+[Quick start](#quick-start) · [Agent Skill](#install-an-agent-skill) · [Frequency & reasoning](#frequency-and-reasoning-are-independent) · [Verification](./docs/版本验证-0.24.0.md) · [简体中文](#简体中文)
+
+</div>
+
+## What it does
+
+Codex Claude Code Bridge is a **Codex plugin and local MCP server for AI coding agent orchestration**. Give Codex a goal, workspace and acceptance criteria. It can create or attach a Claude Code session, delegate scoped implementation, receive handoffs, arrange review and verify the actual changes.
+
+Codex handles planning and key decisions, and can take over implementation. Claude Code handles scoped coding, checks and independent review. Local processes manage sessions, save evidence and wait for events.
+
+The executor uses your existing Claude Code login or model configuration, including third-party models configured through CCSwitch. Orca is optional. Costs depend on the provider, context, caching and rework; the project does not promise a fixed saving.
+
+| Your goal | Example request to Codex |
+| --- | --- |
+| Delegate implementation | “Have Claude implement this in an isolated worktree, then review and verify it.” |
+| Resume earlier work | “Use this workspace and exact Claude session UUID to continue.” |
+| Adjust effort | “Use low frequency and low reasoning; verify the complete batch.” |
+| Collect iteration evidence | “Use the bridge retrospective skill to collect a redacted evidence bundle.” |
+
+## How collaboration works
+
+![Planning, execution, handoff, verification and targeted revision](./docs/图片/协作流程-英文.png)
+
+Claude can actively report results, blockers or decisions. Routine progress stays local; eligible handoffs and major exceptions trigger Codex CLI resumption of the controller. Receiving a report, processing it and accepting the work are separate states.
+
+Native managed tasks support isolated Git worktrees, independent review, revision and acceptance merging. Sessions and owned worktrees or branches can be cleaned up after confirming they are no longer reusable. Existing user workspaces and shared results retain their ownership.
+
+## Choose a runtime
+
+**Start with native terminals. You do not need Orca.**
+
+| Capability | Native managed terminal | Optional Orca workspace |
+| --- | --- | --- |
+| Visible Claude sessions | Create and manage | Create or attach |
+| Existing sessions | Resume exact UUID in the original directory after the original process exits | Attach exact UUID after the current turn, human queue and input are settled; preserve the process |
+| New implementation | Isolated Git worktree | Runs in the specified existing workspace |
+| Review and merge workflow | Integrated | Unified workflow not integrated |
+| Top-level concurrency | Default 3 per Codex controller, configurable up to 10; excess work queues | Unified quota not integrated |
+| Event-driven resumption | Supported | Supported |
+
+[Orca](https://www.onorca.dev/) is an optional desktop workspace for multiple AI terminals and Git worktrees. It is not a model. Use it if you already run Claude there or want a shared view of visible sessions. [Feature boundaries](./docs/功能与限制.md) · [Mac setup](./docs/Mac安装与验收.md)
+
+## Quick start
+
+Prerequisites: **Codex CLI, a working Claude Code configuration, Node.js 20+ and Git**. Native Windows windows also need Windows Terminal and PowerShell 7. macOS uses Terminal. Both platforms use the same source package.
+
+```shell
+codex plugin marketplace add https://github.com/lordfine/codex-claude-bridge.git
+codex plugin add claude-code@codex-claude-bridge
+```
+
+Reload the plugin/MCP connection if required, then tell Codex:
+
+> Check the Claude bridge environment without dispatching a task.
+
+Initial native-terminal setup downloads runtime dependencies through npm. After setup, start with a small task:
+
+> Workspace: <absolute Git repository path>. Use a native managed Claude session to improve the README setup instructions only. Use medium frequency and medium reasoning. Verify the changes against the project scripts, and do not merge yet.
+
+New work happens in a separate worktree; ask Codex to show its path and diff. [Full setup guide](./docs/快速开始.md)
+
+## Install an Agent Skill
+
+The standalone **codex-claude-bridge** skill provides first-run onboarding. It checks the environment and, for an authorized installation or delegation task, prepares the full Codex plugin through the official CLI.
+
+```shell
+npx skills add lordfine/codex-claude-bridge --skill codex-claude-bridge --agent codex
+```
+
+Then invoke:
+
+> Use $codex-claude-bridge to prepare Codex–Claude Code collaboration. Check my current setup first.
+
+Installing the skill does not by itself start an MCP server. The skill verifies plugin installation, handles any required reload, runs setup and routes to the runtime collaboration skill. It preserves your model configuration. Successful first use includes one optional Star/Watch suggestion; skipping it does not affect any functionality.
+
+Skill source: [SKILL.md](./skills/codex-claude-bridge/SKILL.md). [Discovery and onboarding](./docs/技能发现与首次安装.md). Skills directory indexing is separate from direct installation; publication does not guarantee immediate search visibility.
+
+## Frequency and reasoning are independent
+
+The default is **medium frequency + medium reasoning**.
+
+- **Frequency** sets when Codex intervenes: complete batches, milestones or agreed subtasks. Major exceptions and necessary decisions still escalate.
+- **Reasoning** sets requested low/medium/high effort. Complex decisions or repeated failures can receive a scoped increase, then return to the original setting.
+
+![Nine frequency and reasoning combinations](./docs/图片/频率与思考-英文.png)
+
+Ask for low frequency + low reasoning for well-scoped batches, or low frequency + high reasoning for complex work with focused reviews. New Claude sessions receive effort settings and scoped agent definitions. Existing sessions may need an optional restart; the current desktop Codex turn cannot be changed instantly. CLI-displayed effort does not prove a third-party gateway honors it.
+
+## Reuse evidence and collect useful feedback
+
+Task briefs stay focused on the goal, scope, handoff and required checks. Reports include evidence pointers; Codex expands details only when needed. Verification records bind the source snapshot, declared environment, scope and command. Matching evidence can be reused; changes, failure, insufficient coverage or risk require additional verification.
+
+Enable event-driven resumption and let Codex save its phase and end the current turn. An active Goal or another controller writer can still delay resumption.
+
+For an actual task retrospective, invoke:
+
+> Use $claude-code:bridge-retrospective to collect a redacted bridge evidence bundle.
+
+Local collection recursively covers workflow logs and deduplicates requests. Unique events, retry attempts and model executions with usage evidence are counted separately. Collection does not call a model; the invocation turn itself still consumes tokens. Unknown costs remain unknown. Logs are not uploaded automatically.
+
+## Verified scope
+
+Version 0.24.0 passed 197 local bridge regressions and eight CI combinations: Windows, Linux, Mac ARM/Intel × Node.js 22/24. An isolated native session actually called a scoped agent, submitted two reports, and triggered Codex to process both and write an acceptance file. A new Orca session received and completed a test instruction, then its terminal was removed. The onboarding entry has separate installer regressions.
+
+A 30-second quiet interval produced no extra run or usage. This is not a business cost benchmark. Mac GUI/model field tests and private gateway reasoning support remain unverified. [Actual receipts and limitations](./docs/版本验证-0.24.0.md)
+
+## Documentation and support
+
+[Quick start](./docs/快速开始.md) · [Best practices](./docs/最佳实践.md) · [Reasoning profiles](./docs/思考档位与证据复用.md) · [Troubleshooting](./docs/续接故障与人类协同.md) · [Retrospectives](./docs/迭代复盘.md) · [Changelog](./更新日志.md)
+
+For agents and tools: [llms.txt](./llms.txt) provides concise links and boundaries; [project metadata](./项目说明.json) describes supported capabilities. These are project-maintained aids, not an external certification or a promise that every search engine will consume them.
+
+If the project helps, you can voluntarily **Star** to bookmark it or **Watch** to choose update notifications. Report reproducible issues with the version, runtime and redacted evidence through [Issues](https://github.com/lordfine/codex-claude-bridge/issues).
+
+MIT licensed; inherited copyrights are retained. [Project origins](./docs/项目来源.md). Illustrations are editable project diagrams, not software screenshots.
+
+---
+
+<a id="简体中文"></a>
+
+<div align="center">
+
+[**English ↑**](#english) · **简体中文**
+
+</div>
+
 ![Codex 与 Claude Code 的本机协作桥接](./docs/图片/主页封面.png)
 
 <div align="center">
@@ -105,6 +253,16 @@ codex plugin marketplace upgrade codex-claude-bridge
 
 </details>
 
+## 通过技能首次准备
+
+可以从Agent Skills生态安装独立入口：
+
+```shell
+npx skills add lordfine/codex-claude-bridge --skill codex-claude-bridge --agent codex
+```
+
+在Codex中使用 `$codex-claude-bridge`，先检查环境，再根据已授权任务准备完整插件。技能本身不等于MCP服务器；插件安装、工具加载与真实任务成功分别确认。首次准备完成后只提示一次可自愿Star／Watch，跳过不影响使用。[收录与首次安装说明](./docs/技能发现与首次安装.md)
+
 ## 频率与思考分别调
 
 **默认中频＋中思考，两个参数可以独立组合。**
@@ -152,6 +310,12 @@ codex plugin marketplace upgrade codex-claude-bridge
 | Mac 模型实机／网关推理参数 | 本轮未现场验证／实际支持仍需提供方证据 |
 
 以上是 0.24.0 的验证范围，不能外推为所有模型、Goal 流程或故障场景都已验证。[详细回执与限制](./docs/版本验证-0.24.0.md) · [CI 记录](https://github.com/lordfine/codex-claude-bridge/actions/runs/38152387760)
+
+## 给Agent和搜索工具的入口
+
+[llms.txt](./llms.txt)提供短说明和文档链接，[项目说明.json](./项目说明.json)给出能力与限制。它们是项目维护的辅助入口，不保证所有搜索引擎或Agent采用。
+
+有用的话欢迎自愿Star收藏，或Watch选择更新通知；连接器不会替用户操作。
 
 ## 文档与反馈
 
