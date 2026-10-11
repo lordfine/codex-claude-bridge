@@ -49,11 +49,16 @@ test("代理配置无BOM且各档独立，Windows与Mac启动引用不会丢失�
   assert.equal(args[1], "low"); assert.equal(args[2], "--plugin-dir");
   assert.equal(fs.readFileSync(path.join(args[3], ".claude-plugin", "plugin.json"))[0], 123);
   for (const [name, level] of [["低投入", "low"], ["中投入", "medium"], ["高投入", "high"]]) assert.ok(fs.readFileSync(path.join(args[3], "agents", `${name}.md`), "utf8").includes(`effort: ${level}`));
-  for (const system of ["win32", "darwin"]) {
-    const launched = platform.orcaLaunch(crypto.randomUUID(), null, system, null, args);
-    assert.ok(launched.command.includes("--effort")); assert.ok(launched.command.includes("--plugin-dir"));
-    assert.ok(!launched.command.includes("--model"));
-  }
+  const previousPath = process.env.PATH, bin = path.join(f.r.cwd, "命令夹具");
+  fs.mkdirSync(bin); fs.writeFileSync(path.join(bin, "claude"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  process.env.PATH = bin + path.delimiter + previousPath;
+  try {
+    for (const system of ["win32", "darwin"]) {
+      const launched = platform.orcaLaunch(crypto.randomUUID(), null, system, null, args);
+      assert.ok(launched.command.includes("--effort")); assert.ok(launched.command.includes("--plugin-dir"));
+      assert.ok(!launched.command.includes("--model"));
+    }
+  } finally { process.env.PATH = previousPath; }
 });
 test("检查证据按源码环境范围命令核对；修改源码或环境后不能复用", () => {
   const f = fixture(), query = { check_id: "定向检查", scope: "登录逻辑", environment: "节点24_数据集甲", command: "node 检查.mjs" };
