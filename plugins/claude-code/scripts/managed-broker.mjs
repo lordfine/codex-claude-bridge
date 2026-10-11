@@ -14,7 +14,8 @@ import { activeTerminalInput, hasHumanIntervention } from "./lib/managed-input.m
 import { executable, ipcEndpoints, trustConfirmationKey } from "./lib/平台适配.mjs";
 import { executionClock } from "./lib/执行计时.mjs";
 import { findSession, redactText } from "./lib/会话读取.mjs";
-import { deliveryInstruction } from "./lib/协作策略.mjs";
+import { deliveryInstruction, effectiveThinking } from "./lib/协作策略.mjs";
+import { claudeThinkingArgs } from "./lib/思考控制.mjs";
 
 const id = process.argv[2];
 const task = id && readTask(id);
@@ -29,6 +30,10 @@ const args = [task.resume ? "--resume" : "--session-id", task.sessionId,
   "--permission-mode", "bypassPermissions",
   "--settings", task.settingsPath];
 if (task.model) args.push("--model", task.model);
+const thinking = effectiveThinking(task);
+args.push(...claudeThinkingArgs(thinking, path.join(taskDir(id), "执行代理.json")));
+task.thinkingApplication = { requested: thinking.level, state: "launch_configured", actual: null, providerVerification: "unverified", inheritedEffortEnvironment: Boolean(env.CLAUDE_CODE_EFFORT_LEVEL), message: "已传会话与子代理参数；需运行记录核验，网关实际思考支持未验证" };
+writeTask(task);
 if (task.reportMcpConfig) args.push("--mcp-config", task.reportMcpConfig);
 // MCP 配置参数接受多值，必须先结束选项解析，避免首条任务被当成配置文件。
 const deferredInitial = process.platform === "win32" && Boolean(task.initialPrompt?.includes("\n"));
@@ -170,6 +175,10 @@ const finishInterruptedPrompt = () => {
 
 terminal.onData((data) => {
   if (!ready) startupScreen = (startupScreen + data).slice(-8000);
+  if (!ready && !readTask(id)?.thinkingApplication?.actual) {
+    const match = startupScreen.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").match(/\b(low|medium|high|xhigh|max) effort\b/i);
+    if (match) { const saved = readTask(id); saved.thinkingApplication = { ...saved.thinkingApplication, actual: match[1].toLowerCase(), state: "cli_observed", evidence: "startup_effort_display", providerVerification: "unverified" }; writeTask(saved); }
+  }
   if (!ready && startupScreen.includes("Continue without using this MCP server")) {
     const match = startupScreen.match(/New MCP server found in this project:\s*([^\r\n\x1b]+)/);
     const serverName = match?.[1]?.trim();

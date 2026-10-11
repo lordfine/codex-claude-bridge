@@ -154,12 +154,14 @@ export async function observeLocalRecords(controller, { root = MANAGED_ROOT, obs
         if (notice?.faultId === fault.id) writeWakeJson(noticeFile, { ...notice, state: "observation_recovered", recoveredAt, requiresAction: false });
       }
     }
-    next.faultId = null; writeJson(stateFile, next);
+    next.faultId = null; next.failureCount = 0; next.retryAfter = null; writeJson(stateFile, next);
     } catch (error) {
       errors++;
       const fault = recordSchedulerFault(wakeDir(root, controller), error, { stage: "observe_record", taskId: r.id, backend }, { notify: attentionNotice });
       // 不覆盖最后有效游标或交付；仅该记录退避，其他记录继续观察。
-      writeJson(stateFile, { ...previous, faultId: fault.id, retryAfter: now + 5000, lastObservationErrorAt: new Date().toISOString() });
+      const failureCount = (previous.failureCount || 0) + 1;
+      writeJson(stateFile, { ...previous, faultId: fault.id, failureCount, retryAfter: now + Math.min(60000, 5000 * 2 ** Math.min(failureCount - 1, 4)), lastObservationErrorAt: new Date().toISOString() });
+      enqueueWakeEvent(root, r.id, { type: "recovery_uncertain", backend, eventId: `observation-fault:${fault.id}`, faultId: fault.id, requestId: r.lastInstruction?.requestId || null, at: fault.createdAt });
     }
   }
   return { changes, observed: orca.length + native.length, errors, modelCalls: 0 };

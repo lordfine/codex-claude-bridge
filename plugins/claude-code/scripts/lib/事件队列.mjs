@@ -31,7 +31,7 @@ export function enqueueWakeEvent(root, taskId, event) {
   // 不向调度器复制任务正文、工具参数、凭据路径或 Claude 回复。
   writeWakeJson(file, { id, eventId: event.eventId, taskId, controllerId: task.controllerId,
     backend, requestId: event.requestId || null, reportId: event.reportId || null, level: event.level || null, phaseId: event.phaseId || null, requiresDecision: event.requiresDecision === true,
-    workflowId: task.workflowId || null, type: event.type, at: event.at,
+    workflowId: task.workflowId || null, type: event.type, at: event.at, faultId: event.faultId || null,
     decisionId: event.decisionId || null, permissionKind: event.kind || null, humanCursor: event.humanCursor || null });
   return true;
 }

@@ -1,7 +1,7 @@
 {
   "name": "claude-code",
-  "version": "0.23.0",
-  "description": "让 Codex 按协作频率指挥 Claude Code，管理可见会话、阶段交付与验收。",
+  "version": "0.24.0",
+  "description": "让 Codex 按交互频率与思考档位指挥 Claude Code，复用检查证据并管理可见会话。",
   "author": {
     "name": "lordfine"
   },
@@ -9,8 +9,8 @@
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Claude 协作桥接",
-    "shortDescription": "分档指挥 Claude Code 执行、交付与审查。",
-    "longDescription": "默认中频协作，通过本地桥接器管理原生或 Orca 可见会话、阶段交付、只读历史和事件续接；原生托管支持独立工作树、审查与验收合并，继承用户现有 Claude Code 配置。",
+    "shortDescription": "双维档位指挥、证据复用与事件续接。",
+    "longDescription": "默认中频＋中思考，分别控制协作介入与推理投入；支持原生及Orca可见会话、阶段交付、检查证据复用、历史读取和事件续接，继承现有Claude模型配置。",
     "developerName": "lordfine",
     "category": "Productivity",
     "capabilities": [],

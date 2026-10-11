@@ -6,6 +6,7 @@ import { execFileSync } from "node:child_process";
 import { MANAGED_ROOT, controllerId, readJson, writeJson, readTask, writeTask } from "./managed-state.mjs";
 import { redactText } from "./会话读取.mjs";
 import { prepareReporter, reportPath } from "./主动回传.mjs";
+import { validateThinking, thinkingPlan, thinkingInstruction, cleanCheck, environmentFingerprint } from "./思考控制.mjs";
 
 export const PROFILES = { high: 1, medium: 2, low: 3 };
 const LEVELS = { subtask: 1, milestone: 2, batch: 3, review: 3, final: 3 };
@@ -22,10 +23,11 @@ export function validateEffort(value) {
   if (!["inherit", "low", "medium", "high", "xhigh", "max", "ultra"].includes(value)) throw new Error("未知思考等级"); return value;
 }
 export function coordinationConfig(master) {
-  return { controllerId: master, profile: "medium", lightEffort: "low", deepEffort: "inherit", deepEffortOrigin: "pending", summaryChars: 1500,
+  return { controllerId: master, profile: "medium", thinkingLevel: "medium", lightEffort: "low", deepEffort: "medium", deepEffortOrigin: "default", summaryChars: 1500,
     ...readJson(configFile(master)) };
 }
 export function effectiveProfile(task) { return task.coordinationProfile || coordinationConfig(task.controllerId).profile; }
+export function effectiveThinking(task) { return thinkingPlan(task, coordinationConfig(task.controllerId)); }
 export function shouldWake(task, event) {
   if (URGENT.has(event.type)) return true;
   if (event.type === "instruction_completed") return (LEVELS[event.level || task.lastInstruction?.deliveryLevel || "batch"] || 0) >= PROFILES[effectiveProfile(task)];
@@ -35,7 +37,17 @@ export function shouldWake(task, event) {
   return (LEVELS[event.level] || 0) >= PROFILES[effectiveProfile(task)];
 }
 export function eventEffort(config, events) {
-  return events.length && events.every((e) => e.type === "context_sync") ? config.lightEffort : config.deepEffort;
+  if (events.length && events.every((e) => e.type === "context_sync")) return config.lightEffort;
+  // 旧版明确的深度设置保留；新档位允许单任务覆盖及当前请求局部升档。
+  const levels = ["low", "medium", "high", "xhigh", "max", "ultra"];
+  const requested = events.map(e => {
+    const task = /^[0-9a-f-]{36}$/i.test(e.taskId || "") ? e.backend === "orca" ? readJson(path.join(MANAGED_ROOT, "orca", "会话", `${e.taskId}.json`)) : readTask(e.taskId) : null;
+    const plan = thinkingPlan(task, config);
+    if (task?.thinkingLevel || plan.escalation) return plan.level;
+    return ["default", "thinking"].includes(config.deepEffortOrigin) ? plan.level : config.deepEffort;
+  });
+  if (!requested.length) return config.deepEffort;
+  return requested.includes("inherit") ? "inherit" : levels[Math.max(...requested.map(v => levels.indexOf(v)))];
 }
 
 function record(id, backend) {
@@ -116,16 +128,17 @@ export function readHandoff(r) {
 }
 
 export function deliveryInstruction(r, docs, reporterOptions = {}) {
+  const execution = thinkingInstruction(effectiveThinking(r));
   if (r.lastInstruction?.requestId && r.sessionId) {
     const reporter = prepareReporter(r, reporterOptions);
     r.reporter = reporter;
     const route = r.reportMcpConfig ? "调用 claude-bridge-report 的 report 工具。" : `运行以下 CLI（JSON 参数写入回传.json）：\n${reporter.cli}`;
-    return `\n\n## 交付\n阶段边界与交付前，用${r.reportMcpConfig ? `inbox 工具，参数request_id=${r.lastInstruction.requestId}` : `CLI：${reporter.cli.replace('--input "回传.json"', '--inbox')}`}读取补充证据；有证据时判断并用ack确认采用，参数为request_id和evidence_id，不循环轮询。\n完成、受阻或需要决定时，${route}\n`
+    return execution + `\n\n## 交付\n阶段边界与交付前，用${r.reportMcpConfig ? `inbox 工具，参数request_id=${r.lastInstruction.requestId}` : `CLI：${reporter.cli.replace('--input "回传.json"', '--inbox')}`}读取补充证据；有证据时判断并用ack确认采用，参数为request_id和evidence_id，不循环轮询。\n完成、受阻或需要决定时，${route}\n`
       + `回传参数：${JSON.stringify({ request_id: r.lastInstruction.requestId, report_key: "本次唯一编号", status: "completed", summary: "结果摘要", checks: ["实际检查结果"], unresolved: [] })}。受阻用 blocked，需决定用 needs_decision。收据仅表示已保存，不代表验收通过；无需轮询收据。\n详细证据保存到 ${docs.checks}。`;
   }
   const contract = { task_id: r.id, phase_id: "自定义且不可重复的阶段编号", level: "batch", requires_decision: true,
     summary: "本阶段完成项和改动范围，最多1500字", checks: ["实际执行的检查及结果"], unresolved: [], snapshot: "capture" };
-  return `\n协作约定：进度不需要反复询问主控。普通明确错误在任务范围内自行修复，重复失败、方向冲突或需要决定时交付给主控。\n`
+  return execution + `\n协作约定：进度不需要反复询问主控。普通明确错误在任务范围内自行修复，重复失败、方向冲突或需要决定时交付给主控。\n`
     + `在 ${docs.handoff} 写短交付单，包含 JSON 代码块：${JSON.stringify(contract)}。`
     + "子任务进度level=subtask，里程碑=milestone，完整实现批次=batch，独立审查=review，最终交付=final。"
     + "可继续执行时requires_decision=false；需主控决定或完整交付时为true。snapshot=capture由本地观察器核验稳定工作目录，不自行宣称所有后台任务已停止。详细检查证据放验证记录.md。";
@@ -137,12 +150,42 @@ export function coordinationControl(args = {}) {
   if (args.action === "configure") {
     const next = coordinationConfig(master);
     if (args.profile !== undefined) next.profile = validateProfile(args.profile);
+    if (args.thinking !== undefined) { next.thinkingLevel = validateThinking(args.thinking); next.deepEffort = next.thinkingLevel; next.deepEffortOrigin = "thinking"; }
     if (args.deep_effort !== undefined) { next.deepEffort = validateEffort(args.deep_effort); next.deepEffortOrigin = args.effort_origin || "user"; }
     writeJson(configFile(master), next); return next;
   }
   validateId(args.task_id);
   const backend = args.backend || "native"; if (!["native", "orca"].includes(backend)) throw new Error("未知执行后端");
   const r = record(args.task_id, backend); if (r.controllerId !== master) throw new Error("执行记录不属于当前主控");
+  if (["thinking", "escalate", "restore_thinking"].includes(args.action)) {
+    r.thinkingHistory ||= [];
+    if (args.action === "thinking") r.thinkingLevel = args.thinking === "inherit" ? null : validateThinking(args.thinking);
+    if (args.action === "escalate") {
+      if (!args.reason?.trim() || !args.request_id || args.request_id !== r.lastInstruction?.requestId) throw new Error("升档须提供当前请求号和复杂决策或重复失败的依据");
+      const base = effectiveThinking(r).level, levels = ["low", "medium", "high"];
+      r.thinkingEscalation = { level: levels[Math.min(2, levels.indexOf(base) + 1)], requestId: args.request_id, reason: redactText(args.reason).slice(0, 500), at: new Date().toISOString() };
+    }
+    if (args.action === "restore_thinking") r.thinkingEscalation = null;
+    const plan = effectiveThinking(r);
+    r.thinkingApplication = { requested: plan.level, state: "pending_restart", actual: null, providerVerification: "unverified", message: "已保存策略；活动进程未强制改设置。支持的会话启动或用户选择的重启续接后应用" };
+    r.thinkingHistory.push({ action: args.action, level: plan.level, reason: redactText(args.reason || "").slice(0, 500), at: new Date().toISOString() });
+    r.thinkingHistory = r.thinkingHistory.slice(-30); save(r, backend);
+    return { taskId: r.id, thinking: plan, application: r.thinkingApplication };
+  }
+  if (["record_check", "checks", "reuse_check"].includes(args.action)) {
+    const file = path.join(folder(r), "检查账本.json");
+    if (args.action === "record_check") {
+      const data = cleanCheck(args), snapshot = workspaceFingerprint(r.cwd), environmentDigest = environmentFingerprint(r.cwd, data.environment);
+      updateJson(file, old => {
+        const entries = old?.entries || [], entry = { id: args.check_id, ...data, snapshot, environmentDigest, at: new Date().toISOString(), origin: "executor_report", acceptance: "not_verified" };
+        if (entries.length >= 200) throw new Error("检查记录过多，请整理旧记录");
+        return { entries: [...entries.filter(e => e.id !== args.check_id), entry] };
+      });
+    }
+    const snapshot = workspaceFingerprint(r.cwd), entries = (readJson(file)?.entries || []).filter(e => !args.check_id || e.id === args.check_id);
+    if (args.action === "reuse_check" && (!args.check_id || !args.scope || !args.environment || !args.command)) throw new Error("复用须提供检查编号、范围、环境身份和命令");
+    return { taskId: r.id, entries: entries.map(e => ({ ...e, reusable: e.result === "passed" && e.snapshot === snapshot && args.scope === e.scope && args.command === e.command && args.environment === e.environment && e.environmentDigest === environmentFingerprint(r.cwd, args.environment), message: "记录来自执行方；复用还需核对证据完整性与风险范围" })), modelCalls: 0 };
+  }
   if (["evidence", "evidence_status", "background_role"].includes(args.action)) {
     if (args.action === "background_role" && args.role === "released") {
       const saved = r.retainedServices?.[args.background_id];

@@ -6,6 +6,7 @@ import readline from "node:readline";
 import { MANAGED_ROOT, readJson, writeJson } from "./managed-state.mjs";
 import { wakeDir } from "./事件队列.mjs";
 import { findSession } from "./会话读取.mjs";
+import { BRIDGE_VERSION } from "./运行版本.mjs";
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const hash = value => crypto.createHash("sha256").update(String(value)).digest("hex");
@@ -15,6 +16,37 @@ const finite = n => Number.isFinite(n) && n >= 0;
 const usageKeys = ["input_tokens", "cached_input_tokens", "output_tokens"];
 const emptyUsage = () => Object.fromEntries(usageKeys.map(k => [k, 0]));
 const add = (target, source) => { for (const key of Object.keys(target)) target[key] += finite(source?.[key]) ? source[key] : 0; };
+const observationTool = name => /(?:delegate_(?:status|overview|wait|wait_many)|wait_threads|clock__sleep|clock__curr_time|(?:^|__)sleep)$/.test(name);
+export function classifyIterationTool(payload) {
+  const name = payload.name || "";
+  if (observationTool(name)) return { kind: "observation", tools: [name] };
+  if (!/(?:^|[._])exec$/.test(name)) return { kind: /(?:^|[._])wait$/.test(name) ? "unknown" : "work", tools: [name] };
+  const script = typeof payload.input === "string" ? payload.input : payload.arguments;
+  if (typeof script !== "string") return { kind: "unknown", tools: [] };
+  // 仅解析静态工具调用，不执行采集来的代码；隐藏字符串和注释中的伪工具名。
+  const stripped = script.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`/g, " ");
+  const calls = [...stripped.matchAll(/\btools\.([A-Za-z0-9_]+)\s*\(/g)].map(m => m[1]);
+  if (/\b(?:eval|import|require|fetch|process)\b|tools\s*\[/.test(stripped) || !calls.length) return { kind: "unknown", tools: calls };
+  const otherCalls = [...stripped.matchAll(/\b([A-Za-z_]\w*)\.([A-Za-z_]\w*)\s*\(/g)];
+  if (otherCalls.some(([, object, method]) => object !== "tools" && !(object === "JSON" && method === "stringify") && !(object === "Promise" && ["all", "allSettled"].includes(method)))) return { kind: "unknown", tools: calls };
+  return { kind: calls.every(observationTool) ? "observation" : "work", tools: calls };
+}
+function childLogs(dir, warnings) {
+  const files = [], seen = new Set();
+  const walk = (folder, depth = 0) => {
+    if (depth > 16 || files.length >= 5000) { warnings.push("Claude：递归子日志达到边界，覆盖不完整"); return; }
+    for (const name of names(folder)) {
+      const file = path.join(folder, name); let stat; try { stat = fs.lstatSync(file); } catch { continue; }
+      if (stat.isSymbolicLink()) continue;
+      if (stat.isDirectory()) walk(file, depth + 1);
+      else if (stat.isFile() && name.endsWith(".jsonl")) {
+        const canonical = fs.realpathSync(file);
+        if (!seen.has(canonical)) { seen.add(canonical); files.push(file); }
+      }
+    }
+  };
+  walk(dir); return files;
+}
 
 function findRollout(home, controller) {
   const matches = [];
@@ -71,12 +103,13 @@ export async function collectIteration(options = {}) {
   const warnings = [], sources = [], evidence = [];
   const maxBytes = options.maxBytes || 512 * 1024 * 1024;
   const rollout = options.rollout || config?.rolloutPath || findRollout(codexHome, controller);
-  const codex = { usage: emptyUsage(), usageAvailable: false, cumulativeResets: 0, turns: 0, toolCalls: 0, toolArgumentBytes: 0, toolResultBytes: 0, tools: {}, observationCandidates: 0, candidateUsage: emptyUsage() };
+  const codex = { usage: emptyUsage(), usageAvailable: false, cumulativeResets: 0, turns: 0, toolCalls: 0, toolArgumentBytes: 0, toolResultBytes: 0, tools: {}, nestedTools: {}, observationCandidates: 0, unknownToolTurns: 0, candidateUsage: emptyUsage() };
   let totals = null, turn = null, identity = false;
   const finish = () => {
     if (!turn) return;
     // 工具白名单只产生候选，不把未知命令、无工具推理或真实判断冒充空转。
-    if (turn.tools.length && turn.tools.every(n => /(?:delegate_(?:status|overview|wait|wait_many)|wait_threads|clock__sleep)$/.test(n))) {
+    if (turn.tools.includes("unknown")) codex.unknownToolTurns++;
+    if (turn.tools.length && turn.tools.every(n => n === "observation")) {
       codex.observationCandidates++; add(codex.candidateUsage, turn.usage);
       if (evidence.length < 30) evidence.push({ kind: "仅观察候选", ...turn.pointer, toolCalls: turn.tools.length, usage: turn.usage });
     }
@@ -102,7 +135,9 @@ export async function collectIteration(options = {}) {
       const name = /^[\w.-]{1,150}$/.test(p.name || "") ? p.name : "未知工具";
       codex.tools[name] = (codex.tools[name] || 0) + 1; codex.toolCalls++;
       codex.toolArgumentBytes += Buffer.byteLength(typeof p.arguments === "string" ? p.arguments : typeof p.input === "string" ? p.input : "");
-      turn?.tools.push(name);
+      const classification = classifyIterationTool(p);
+      turn?.tools.push(classification.kind);
+      if (/(?:^|[._])exec$/.test(name)) for (const nested of classification.tools) codex.nestedTools[nested] = (codex.nestedTools[nested] || 0) + 1;
     }
     if (row.type === "response_item" && ["function_call_output", "custom_tool_call_output"].includes(p.type)) codex.toolResultBytes += Buffer.byteLength(JSON.stringify(p.output || ""));
     if (row.type === "event_msg" && ["task_complete", "turn_aborted"].includes(p.type)) finish();
@@ -113,38 +148,39 @@ export async function collectIteration(options = {}) {
   if (!codex.usageAvailable) codex.usage = null;
   const claudeUsage = () => ({ input_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 0 });
   const claude = { sessions: 0, subagents: 0, messages: 0, toolCalls: 0, usage: claudeUsage(), mainUsage: claudeUsage(), subagentUsage: claudeUsage(), usageAvailable: false };
-  const seenSessions = new Set();
+  const seenSessions = new Set(), allMessages = new Map(), allTools = new Set(), seenFiles = new Set();
   for (const r of records) {
     if (!uuid.test(r.sessionId || "") || seenSessions.has(r.sessionId)) continue;
     seenSessions.add(r.sessionId);
     let file; try { file = (options.findClaude || findSession)(r.sessionId, r.cwd, { allowMissingDirectory: true }); } catch {}
     const entries = [{ file, kind: "Claude主会话" }];
     if (file) {
-      const dir = path.join(path.dirname(file), r.sessionId, "subagents");
-      for (const name of names(dir).filter(n => n.endsWith(".jsonl"))) entries.push({ file: path.join(dir, name), kind: "Claude子代理" });
+      const dir = path.join(path.dirname(file), r.sessionId);
+      for (const child of childLogs(dir, warnings)) entries.push({ file: child, kind: "Claude子代理" });
     }
     for (const entry of entries) {
-      const messages = new Map(), tools = new Set();
+      if (entry.file && fs.existsSync(entry.file)) { const canonical = fs.realpathSync(entry.file); if (seenFiles.has(canonical)) continue; seenFiles.add(canonical); }
       const source = await scan(entry.file, row => {
         if (!inRange(row.timestamp) || row.type !== "assistant") return;
         const m = row.message;
         if (!m?.id || !finite(m.usage?.input_tokens) || !finite(m.usage?.output_tokens)) return;
-        const key = String(m.id), previous = messages.get(key) || {};
-        for (const k of Object.keys(claude.usage)) if (finite(m.usage[k])) previous[k] = Math.max(previous[k] || 0, m.usage[k]);
-        messages.set(key, previous);
-        for (const block of m.content || []) if (block.type === "tool_use" && block.id) tools.add(block.id);
+        const key = String(m.id), previous = allMessages.get(key) || { usage: {}, kind: entry.kind };
+        for (const k of Object.keys(claude.usage)) if (finite(m.usage[k])) previous.usage[k] = Math.max(previous.usage[k] || 0, m.usage[k]);
+        if (entry.kind === "Claude主会话") previous.kind = entry.kind;
+        allMessages.set(key, previous);
+        for (const block of m.content || []) if (block.type === "tool_use" && block.id) allTools.add(block.id);
       }, sources, warnings, entry.kind, maxBytes);
       source.sessionId = r.sessionId;
       source.recordId = r.id;
       source.agentFile = entry.kind === "Claude子代理" && /^agent-[\w-]+\.jsonl$/.test(path.basename(entry.file)) ? path.basename(entry.file) : null;
       if (entry.file) { if (entry.kind === "Claude主会话") claude.sessions++; else claude.subagents++; }
-      for (const m of messages.values()) { add(claude.usage, m); add(entry.kind === "Claude主会话" ? claude.mainUsage : claude.subagentUsage, m); claude.usageAvailable = true; }
-      claude.messages += messages.size; claude.toolCalls += tools.size;
     }
   }
+  for (const m of allMessages.values()) { add(claude.usage, m.usage); add(m.kind === "Claude主会话" ? claude.mainUsage : claude.subagentUsage, m.usage); claude.usageAvailable = true; }
+  claude.messages = allMessages.size; claude.toolCalls = allTools.size;
   if (!claude.usageAvailable) { claude.usage = null; claude.mainUsage = null; claude.subagentUsage = null; }
   if (!claude.subagents) claude.subagentUsage = null;
-  const runs = jsonFiles(path.join(folder, "runs")).filter(r => inRange(r.createdAt));
+  const runs = jsonFiles(path.join(folder, "runs")).filter(r => inRange(r.createdAt)).sort((a,b) => String(a.createdAt).localeCompare(String(b.createdAt)));
   const faults = jsonFiles(path.join(folder, "faults")).filter(f => inRange(f.createdAt));
   const acknowledgements = jsonFiles(path.join(folder, "ack"));
   const reports = [...jsonFiles(path.join(root, "reports")), ...records.flatMap(r => jsonFiles(path.join(root, "reports", "by-task", `${r.backend}-${r.id}`)))]
@@ -157,14 +193,30 @@ export async function collectIteration(options = {}) {
     if (finite(ms)) latency.push(ms);
   }
   const counts = items => items.reduce((all, key) => ({ ...all, [key]: (all[key] || 0) + 1 }), {});
+  const uniqueEvents = new Map();
+  for (const run of runs) for (const event of run.events || []) {
+    const key = event.id || (event.eventId ? `${event.backend || "native"}:${event.taskId}:${event.eventId}` : null);
+    if (key) uniqueEvents.set(key, event);
+  }
+  const pending = [...reportMap.values()].filter(r => r.data?.status !== "progress" && !acknowledgements.some(a => a.id === hash(`${r.taskId}:${r.eventId}`) && Date.parse(a.at) <= until));
+  const pendingStates = pending.map(r => {
+    const task = records.find(t => t.id === r.taskId && t.backend === r.backend);
+    if (!task || task.archivedAt || task.supersededBy || ["merged", "cancelled", "released", "closed"].includes(task.state)) return "retired_execution";
+    if (task.lastInstruction?.requestId && r.requestId !== task.lastInstruction.requestId) return "historical_request";
+    return "awaiting_processing";
+  });
+  const executionProved = runs.filter(r => [r.usage, r.usageDelta].some(u => usageKeys.some(k => finite(u?.[k]) && u[k] > 0)));
   const accepted = records.filter(r => readJson(path.join(root, "acceptance", `${r.backend}-${r.id}.json`))?.at && inRange(readJson(path.join(root, "acceptance", `${r.backend}-${r.id}.json`)).at)).length;
   const workflows = jsonFiles(path.join(root, "workflows")).filter(w => w.controllerId === controller);
-  const report = { schemaVersion: 1, collectedAt: new Date().toISOString(), controllerId: controller,
+  const report = { schemaVersion: 2, collectorVersion: BRIDGE_VERSION, collectedAt: new Date().toISOString(), controllerId: controller,
     range: { since: Number.isFinite(since) ? new Date(since).toISOString() : null, until: new Date(until).toISOString(), scope: "当前Codex主控及关联Claude会话；既有Claude会话可包含接入前用量" },
     tasks: records.map(r => ({ taskId: r.id, sessionId: r.sessionId, backend: r.backend, archived: Boolean(r.archivedAt) })),
     codex, claude, collaboration: { wakeRuns: runs.length, runStates: counts(runs.map(r => r.state || "unknown")),
-      wakeReasons: counts(runs.flatMap(r => (r.events || []).map(e => e.type || "unknown"))), reports: reportMap.size,
-      processedReports: latency.length, pendingReports: [...reportMap.values()].filter(r => r.data?.status !== "progress").length - latency.length,
+      wakeReasons: counts([...uniqueEvents.values()].map(e => e.type || "unknown")), eventOccurrences: counts(runs.flatMap(r => (r.events || []).map(e => e.type || "unknown"))), uniqueWakeEvents: uniqueEvents.size,
+      attemptsMissingEventIdentity: runs.flatMap(r => r.events || []).filter(e => !e.id && !e.eventId).length,
+      modelExecutionsProved: executionProved.length, executionsNotStarted: runs.filter(r => r.state === "deferred_busy" || r.executionStarted === false).length,
+      executionsUnknown: runs.filter(r => r.state !== "deferred_busy" && r.executionStarted !== false && !executionProved.includes(r)).length,
+      reports: reportMap.size, processedReports: latency.length, pendingReports: pending.length, pendingReportStates: counts(pendingStates), lifecycleBasis: "current_records_at_collection",
       reportToProcessedMs: { samples: latency.length, median: latency.length ? [...latency].sort((a,b) => a-b)[Math.floor(latency.length / 2)] : null, max: latency.length ? Math.max(...latency) : null },
       recordedAcceptances: accepted, faults: faults.length, resolvedFaults: faults.filter(f => ["resolved", "observation_recovered"].includes(f.state)).length,
       rework: null, humanInterventions: null,
@@ -172,19 +224,28 @@ export async function collectIteration(options = {}) {
       workflowRepairScope: "流程累计记录，不等于选定时间段或Orca全部返工",
       reportEvents: [...reportMap.values()].slice(-100).map(r => {
         const ack = acknowledgements.find(a => a.id === hash(`${r.taskId}:${r.eventId}`) && Date.parse(a.at) <= until);
-        return { reportId: r.reportId, taskId: r.taskId, requestDigest: hash(r.requestId || ""), at: r.at, status: r.data?.status, level: r.data?.level, processedAt: ack?.at || null, acceptance: "not_verified" };
+        const executing = ack?.processedBy && runs.find(run => run.id === ack.processedBy);
+        const start = ack?.executionStartedAt || executing?.executionStartedAt || null;
+        return { reportId: r.reportId, taskId: r.taskId, requestDigest: hash(r.requestId || ""), at: r.at, status: r.data?.status, level: r.data?.level, processedAt: ack?.at || null,
+          executionStartedAt: start, reportToExecutionMs: start && finite(Date.parse(start) - Date.parse(r.at)) ? Date.parse(start) - Date.parse(r.at) : null,
+          executionToProcessedMs: start && ack && finite(Date.parse(ack.at) - Date.parse(start)) ? Date.parse(ack.at) - Date.parse(start) : null,
+          acceptance: "not_verified" };
       }),
       faultEvents: faults.slice(-100).map(f => ({ id: f.id, at: f.createdAt, resolvedAt: f.resolvedAt || f.recoveredAt || null,
-        category: /^[A-Z_]{1,80}$/.test(f.diagnostic?.category || "") ? f.diagnostic.category : "UNKNOWN", fatal: Boolean(f.fatal) })),
-      runs: runs.slice(-100).map(r => ({ id: r.id, state: r.state, at: r.createdAt, completedAt: r.completedAt || null, usageDelta: r.usageDelta || null, tools: r.tools?.length || 0,
+        category: /^[A-Z_]{1,80}$/.test(f.diagnostic?.category || "") ? f.diagnostic.category : "UNKNOWN", fatal: Boolean(f.fatal),
+        version: f.version || f.diagnostic?.version || null, occurrences: f.occurrences || 1, dedupDigest: f.dedupKey || null,
+        stage: /^[\w-]{1,80}$/.test(f.diagnostic?.stage || "") ? f.diagnostic.stage : "unknown", code: /^[A-Z0-9_]{1,60}$/.test(f.diagnostic?.code || "") ? f.diagnostic.code : null,
+        diagnosticDigest: f.diagnostic ? hash(JSON.stringify(f.diagnostic)) : null })),
+      runs: runs.slice(-100).map(r => ({ id: r.id, version: r.version || null, state: r.state, at: r.createdAt, executionStarted: r.executionStarted ?? null, executionStartedAt: r.executionStartedAt || null, completedAt: r.completedAt || null, usageDelta: r.usageDelta || null, tools: r.tools?.length || 0,
+        requestedEffort: r.requestedEffort || null, actualEffort: r.actualEffort || null,
         processedEvents: r.results?.filter(i => i.outcome === "processed").length ?? null, unprocessedEvents: r.unprocessedEventIds?.length ?? null })) },
     costs: { codex: null, claude: null, total: null, perAcceptedTask: null, reason: "缺少可靠账单和单工单费用归属，不以公开单价推算CCswitch或订阅账单" },
-    evidence, sources, warnings: [...warnings, "仅观察候选不是已证实浪费；工具调用字节不是token。", "范围边界可能横跨轮次；轮次只数范围内的开始事件，零次不表示没有活动。", "缺失或截断时计数只代表已读取部分，零不是完整零活动证明。", "返工、人工介入和业务验收缺少完整可归因事件，标为未知。", "Claude用量按消息ID去重；缓存读与缓存写分开，不与Codex字段直接比较。"], modelCalls: 0 };
+    evidence, sources, warnings: [...warnings, "仅观察候选不是已证实浪费；工具调用字节不是token。", "范围边界可能横跨轮次；轮次只数范围内的开始事件，零次不表示没有活动。", "缺失或截断时计数只代表已读取部分，零不是完整零活动证明。", "返工、人工介入和业务验收缺少完整可归因事件，标为未知。", "Claude用量按消息ID跨来源去重并递归读取工作流子日志；缓存读与缓存写分开。", "唤醒原因按事件身份去重；eventOccurrences记录重试重复出现次数。", "报告到处理时延包含排队和实际处理；缺少执行时间的历史记录无法拆分。", "等待工具未能关联实际工作时标为未知；仅观察候选不是成本结论。"], modelCalls: 0 };
   const outputRoot = options.output || path.join(os.homedir(), ".cache", "cc-plugin-codex", "迭代复盘");
   const output = path.join(path.resolve(outputRoot), `${new Date().toISOString().replaceAll(/[:.]/g, "-")}-${controller.slice(0,8)}-${crypto.randomUUID().slice(0,8)}`);
   fs.mkdirSync(output, { recursive: true });
   writeJson(path.join(output, "证据包.json"), report);
   const shown = value => value === null ? "未知" : JSON.stringify(value);
-  fs.writeFileSync(path.join(output, "复盘报告.md"), `# Claude 桥接协作复盘\n\n主控：${controller}\n\n## 已测得\n\n- Codex 轮次：${codex.turns}；工具调用：${codex.toolCalls}；仅观察候选：${codex.observationCandidates}。\n- Codex 用量：${shown(codex.usage)}。\n- Claude 用量：${shown(claude.usage)}；子代理记录：${claude.subagents}。\n- 桥接续接：${runs.length} 次；报告：${reportMap.size} 份；已处理回执：${latency.length} 份。\n- 回传到处理：${latency.length} 个样本，中位数 ${shown(report.collaboration.reportToProcessedMs.median)} 毫秒。\n- 故障：${faults.length}；记录中的验收：${accepted}。\n\n## 待判断\n\n- 费用及每工单成本：未知。\n- 返工与人工介入次数：未知。\n- 仅观察轮先核对是否有必要判断，不能直接算作节省。\n\n## 覆盖与限制\n\n${report.warnings.map(w => `- ${w}`).join("\n")}\n- 原始聊天、命令、凭据、完整路径和错误正文均未复制。证据指针使用来源编号及行号。\n- 完整结构统计见同目录的 证据包.json。此次采集调用模型 ${report.modelCalls} 次。\n`, "utf8");
+  fs.writeFileSync(path.join(output, "复盘报告.md"), `# Claude 桥接协作复盘\n\n主控：${controller}\n\n## 已测得\n\n- Codex 轮次：${codex.turns}；工具调用：${codex.toolCalls}；仅观察候选：${codex.observationCandidates}；工具行为无法归因的轮次：${codex.unknownToolTurns}。\n- Codex 用量：${shown(codex.usage)}。\n- Claude 用量：${shown(claude.usage)}；子代理记录：${claude.subagents}。\n- 调度尝试：${runs.length} 次；独立事件：${uniqueEvents.size}；已证明模型执行：${executionProved.length}；未开始执行：${report.collaboration.executionsNotStarted}；执行未知：${report.collaboration.executionsUnknown}。\n- 报告：${reportMap.size} 份；已处理回执：${latency.length} 份。\n- 回传到处理：${latency.length} 个样本，中位数 ${shown(report.collaboration.reportToProcessedMs.median)} 毫秒。\n- 故障：${faults.length}；记录中的验收：${accepted}。\n\n## 待判断\n\n- 费用及每工单成本：未知。\n- 返工与人工介入次数：未知。\n- 仅观察轮先核对是否有必要判断，不能直接算作节省。\n\n## 覆盖与限制\n\n${report.warnings.map(w => `- ${w}`).join("\n")}\n- 原始聊天、命令、凭据、完整路径和错误正文均未复制。证据指针使用来源编号及行号。\n- 完整结构统计见同目录的 证据包.json。此次采集调用模型 ${report.modelCalls} 次。\n`, "utf8");
   return { report: path.join(output, "复盘报告.md"), evidence: path.join(output, "证据包.json"), sources: sources.length, warnings: warnings.length, modelCalls: 0 };
 }

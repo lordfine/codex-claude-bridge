@@ -6,7 +6,7 @@
 
 **把一个需求，变成有分工、有进度、有验收的 AI 协作任务。**
 
-[![版本](https://img.shields.io/badge/版本-v0.23.0-303c3b)](https://github.com/lordfine/codex-claude-bridge/releases/latest)
+[![版本](https://img.shields.io/badge/版本-v0.24.0-303c3b)](https://github.com/lordfine/codex-claude-bridge/releases/latest)
 [![检查](https://github.com/lordfine/codex-claude-bridge/actions/workflows/test.yml/badge.svg)](https://github.com/lordfine/codex-claude-bridge/actions/workflows/test.yml)
 [![许可](https://img.shields.io/github/license/lordfine/codex-claude-bridge?label=许可)](./LICENSE)
 
@@ -99,6 +99,8 @@
 **0.20.0：完成事件实测与输入分层。** UI composer不再当作终端输入；提交状态由真实日志核验，低频只在整批或重大异常介入。新隔离会话已取得Claude完成→Codex实际复核的回执；原业务会话与共享Orca全应用重启仍单独待验。[验证记录](./docs/版本验证-0.20.0.md)
 
 ## 怎么开始？
+
+**0.24.0：频率与思考独立调节，减少重复检查，修正复盘统计。** 默认中频＋中思考，可选低频低思考、低频高思考等九种组合；任务困难时局部升档。新增源码与环境绑定的检查账本，补齐递归子代理日志与唤醒去重。[档位怎么选](./docs/思考档位与证据复用.md) · [本次验证](./docs/版本验证-0.24.0.md)
 
 **0.23.0：少补查、交付逐份处理、复盘一键收集。** 唤醒时带齐报告和稳定性证据；重要报告分别留队，后来的进度不会顶掉交付；每份报告明确记录是否已处理。新增“桥接复盘”技能，在干活的 Codex 窗口调用即可生成本地脱敏报告和证据包。[复盘怎么用](./docs/迭代复盘.md) · [实测与限制](./docs/版本验证-0.23.0.md)
 

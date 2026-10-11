@@ -70,3 +70,7 @@ node scripts/实机验收.mjs --确认运行
 接入：给 Codex 原绝对工作区、精确 Claude UUID，确认人类当前轮与队列已结束。新建：给已注册工作区，插件使用 macOS shell 和已解析 Claude 路径启动；首次信任／MCP 弹窗在 Orca 处理。
 
 Orca 的自动合并与统一预算仍未接入。需要完整独立工作树、审查与合并时，使用普通托管路径。[功能与限制](./功能与限制.md)
+
+## 0.24思考档位
+
+Mac与Windows共用profile／thinking及检查账本。新会话通过--effort与--plugin-dir加载会话专用代理；已有会话未能应用时显示pending_restart。Mac兼容性由CI的ARM与Intel、Node22／24回归及真实PTY夹具核验；本轮真实模型链路在Windows完成，不能称为Mac模型实机验收。

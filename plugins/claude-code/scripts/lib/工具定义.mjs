@@ -19,13 +19,13 @@ const SETUP_TOOL = {
 const MANAGED_TOOLS = [
   { name: "delegate_overview", description: "一次读取主控的原生与Orca短进度，包含执行线、会话、工作区、交付快照和暂停待办。无变化结束模型轮；force仅用于用户主动查询。", inputSchema: { type: "object", properties: { controller_id: { type: "string" }, after_cursor: STATUS_CURSOR, after_revision: { type: "string" }, limit: { type: "integer", minimum: 1, maximum: 50 } }, additionalProperties: false } },
   {
-    name: "delegate_coordination", description: "读取或设置主控的低/中/高协作档位，默认 medium；可逐任务覆盖。prepare 创建忽略 Git 的过程记录；snapshot 核对实际工作目录；handoff 只返回已核验短交付单。普通进度不调用模型，重大异常和需要决定的交付即时处理。",
+    name: "delegate_coordination", description: "分别设置交互频率profile与思考档thinking，默认medium＋medium；thinking逐任务覆盖，escalate临时升档、restore_thinking恢复。record_check保存源码和环境绑定的检查，reuse_check核对复用条件。活动Claude进程参数无法安全应用时明确返回pending_restart。prepare 创建忽略 Git 的过程记录；snapshot 核对实际工作目录；handoff 只返回已核验短交付单。普通进度不调用模型，重大异常和需要决定的交付即时处理。",
     inputSchema: { type: "object", properties: {
-        action: { type: "string", enum: ["status", "configure", "profile", "prepare", "snapshot", "handoff", "report", "evidence", "evidence_status", "background_role"] },
-        request_id: { type: "string" }, evidence_id: { type: "string" }, text: { type: "string", maxLength: 3000 }, background_id: { type: "string" }, role: { type: "string", enum: ["service", "work", "released"] }, reason: { type: "string" },
+        action: { type: "string", enum: ["status", "configure", "profile", "prepare", "snapshot", "handoff", "report", "evidence", "evidence_status", "background_role", "thinking", "escalate", "restore_thinking", "record_check", "checks", "reuse_check"] },
+        check_id: { type: "string" }, scope: { type: "string" }, environment: { type: "string" }, command: { type: "string" }, result: { type: "string", enum: ["passed", "failed"] }, evidence: { type: "string" }, uncovered: { type: "string" }, request_id: { type: "string" }, evidence_id: { type: "string" }, text: { type: "string", maxLength: 3000 }, background_id: { type: "string" }, role: { type: "string", enum: ["service", "work", "released"] }, reason: { type: "string" },
         report_id: { type: "string", description: "读取指定不可变回传，避免用最新交付冒充旧事件结果" },
       controller_id: { type: "string" }, task_id: { type: "string" }, backend: { type: "string", enum: ["native", "orca"] },
-      profile: { type: "string", enum: ["low", "medium", "high", "inherit"] }, deep_effort: { type: "string", enum: ["inherit", "low", "medium", "high", "xhigh", "max", "ultra"] }, task_text: { type: "string" }
+      thinking: { type: "string", enum: ["low", "medium", "high", "inherit"] }, profile: { type: "string", enum: ["low", "medium", "high", "inherit"] }, deep_effort: { type: "string", enum: ["inherit", "low", "medium", "high", "xhigh", "max", "ultra"] }, task_text: { type: "string" }
     }, required: ["action"], additionalProperties: false }
   },
   {
@@ -46,7 +46,7 @@ const MANAGED_TOOLS = [
       session_id: { type: "string" }, terminal_id: { type: "string" }, idle_confirmed: { type: "boolean" },
       request_id: { type: "string" }, title: { type: "string" }, model: { type: "string" }, prompt: { type: "string" },
       draft_hash: { type: "string" }, draft_confirmed: { type: "boolean" }, delivery_level: { type: "string", enum: ["subtask", "milestone", "batch", "review", "final"] },
-      profile: { type: "string", enum: ["low", "medium", "high"] }, process_docs: { type: "boolean" }, include_text: { type: "boolean" }, stop_confirmed: { type: "boolean" },
+      thinking: { type: "string", enum: ["low", "medium", "high"] }, profile: { type: "string", enum: ["low", "medium", "high"] }, process_docs: { type: "boolean" }, include_text: { type: "boolean" }, stop_confirmed: { type: "boolean" },
       force: { type: "boolean" }, after_cursor: STATUS_CURSOR, after_revision: { type: "string" }, screen_revision: { type: "string" }, max_chars: { type: "integer" },
       timeout_ms: { type: "integer", minimum: 1, maximum: 60000 }, cursor: { type: ["string", "object"] },
       limit: { type: "integer", minimum: 1, maximum: 300 }, close_attached_confirmed: { type: "boolean" }
@@ -61,7 +61,7 @@ const MANAGED_TOOLS = [
       existing_idle_confirmed: { type: "boolean", description: "既有会话原进程已退出时才设 true；活动中的外部窗口不能被本桥接器直接接管" },
       model: { type: "string", description: "当前配置中的模型槽或实际模型名；省略则继承" },
       prompt: { type: "string", description: "可选的首条任务指令，待会话就绪后发送" },
-      profile: { type: "string", enum: ["low", "medium", "high"] }, process_docs: { type: "boolean" },
+      thinking: { type: "string", enum: ["low", "medium", "high"] }, profile: { type: "string", enum: ["low", "medium", "high"] }, process_docs: { type: "boolean" },
       permission_wait_seconds: { type: "integer", minimum: 1, maximum: 900, description: "敏感审批等待Codex秒数，默认300；超时转人工并保留记录" }, max_minutes: { type: "integer", minimum: 0, maximum: 1440, description: "单个会话最大累计执行分钟数，审批与人类挂起暂停计时；默认 0 不限时，仅用户指定时设置正整数" }, max_turns: { type: "integer" }, subagent_limit: { type: "integer" },
       controller_id: { type: "string", description: "主控 Codex 任务 ID；通常从环境自动获取" },
       visible: { type: "boolean", description: "是否自动打开可见窗口，默认 true" }
@@ -140,7 +140,7 @@ const MANAGED_TOOLS = [
     inputSchema: { type: "object", properties: {
       action: { type: "string", enum: ["create", "list", "status", "dispatch", "review", "revise", "accept", "checkpoint", "pause", "resume", "cancel"] },
       workflow_id: { type: "string" }, controller_id: { type: "string" }, request_id: { type: "string" },
-      profile: { type: "string", enum: ["low", "medium", "high"] }, process_docs: { type: "boolean" },
+      thinking: { type: "string", enum: ["low", "medium", "high"] }, profile: { type: "string", enum: ["low", "medium", "high"] }, process_docs: { type: "boolean" },
       cwd: { type: "string" }, goal: { type: "string" }, acceptance: { type: "string" }, detail: { type: "boolean" },
       item_id: { type: "string" }, model: { type: "string" }, feedback: { type: "string" },
       verification: { type: "string" }, summary: { type: "string" }, visible: { type: "boolean" },
